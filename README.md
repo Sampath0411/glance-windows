@@ -49,7 +49,7 @@ the lock screen stays Windows' own.
 - A webcam
 - Administrator approval for installation and for enabling the credential provider
 
-<a href="https://github.com/Sampath0411/glance-windows/releases/latest"><img width="200" src="https://img.shields.io/badge/Download-Windows%2011-2f81f7?style=for-the-badge&logo=windows11&logoColor=white" alt="Download for Windows" /></a>
+<a href="https://github.com/Sampath0411/glance-windows/releases"><img width="200" src="https://img.shields.io/badge/Download-Windows%2011-2f81f7?style=for-the-badge&logo=windows11&logoColor=white" alt="Download for Windows" /></a>
 
 Run `GlanceSetup.exe` and follow the installer. Glance installs its protected components
 under `%ProgramFiles%\Glance`; the app and face agent themselves run unelevated. The
