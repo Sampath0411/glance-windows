@@ -1,0 +1,12 @@
+Glance source code is licensed under the MIT License.
+
+The included InsightFace buffalo_s face-recognition model weights are subject to
+separate non-commercial research-only terms. The Glance MIT license does not
+apply to or remove restrictions on these model weights. Do not use or redistribute
+the weights commercially without separate permission.
+
+This setup installs the Glance desktop application only. It does not install or
+enable a Windows lock-screen credential provider. Normal Windows password and
+PIN sign-in remain available.
+
+See THIRD_PARTY_NOTICES.md installed with Glance for additional component notices.

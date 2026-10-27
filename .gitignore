@@ -1,0 +1,41 @@
+# Local Python environments and interpreter output
+.venv/
+__pycache__/
+*.py[cod]
+
+# Enrollment data, generated identities, and machine-specific logs
+/data/
+*.log
+/provider/logs/
+
+# Face model assets are downloaded at build time; never commit model weights.
+/models/
+*.onnx
+*.zip
+*.onnx.tmp
+
+# Local credentials, signing material, and secrets
+*.pem
+*.pfx
+*.key
+.env
+.env.*
+!.env.example
+
+# Build products
+/.build/
+/build/
+/dist/
+/packaging/staging/
+/packaging/output/
+/provider/build/
+*.iss.tmp
+nuitka-crash-report.xml
+
+# Local agent/superpowers context
+/.superpowers/
+/docs/superpowers/
+/PHASE3.md
+
+# Per-machine recovery notes may contain usernames, paths, or recovery procedures.
+/RECOVERY.txt

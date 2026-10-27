@@ -1,0 +1,4 @@
+# Pinned standalone compiler. Inno Setup 6 is installed separately by the build workflow.
+Nuitka==4.3.1
+zstandard==0.23.0
+Pillow==13.0.0
