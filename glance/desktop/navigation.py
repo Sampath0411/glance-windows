@@ -1,7 +1,9 @@
 """Persistent native navigation for Glance's six settings screens."""
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -17,52 +19,74 @@ from .theme import MUTED, app_icon
 
 
 def navigation_icon(index: int, color: str = MUTED) -> QIcon:
-    """Paint one 20pt line icon at 2x so it stays crisp on HiDPI screens."""
-    pixmap = QPixmap(40, 40)
+    """Paint one 20pt line icon at 2x so it stays crisp on HiDPI screens.
+
+    Everything is drawn on a 20x20 grid in logical units, so a coordinate of 10 is the
+    centre of the glyph. The pixmap is 2x with a device pixel ratio of 2, which gives
+    Qt a 20pt icon and a 40px bitmap on high-DPI screens.
+    """
+    ratio = 2
+    pixmap = QPixmap(20 * ratio, 20 * ratio)
     pixmap.fill(Qt.transparent)
+    pixmap.setDevicePixelRatio(ratio)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.scale(2, 2)
-    pen = QPen(QColor(color), 1.4)
+    pen = QPen(QColor(color), 1.5)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.NoBrush)
 
-    if index == 0:  # General: cog
-        painter.drawEllipse(6.0, 6.0, 8.0, 8.0)
-        painter.drawEllipse(8.6, 8.6, 2.8, 2.8)
-        for step in range(8):
-            import math
+    def fill_dot(x: float, y: float, radius: float = 0.85) -> None:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(QPointF(x, y), radius, radius)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(pen)
 
-            angle = math.radians(step * 45)
-            x1 = 10 + 5.6 * math.cos(angle)
-            y1 = 10 + 5.6 * math.sin(angle)
-            x2 = 10 + 8.2 * math.cos(angle)
-            y2 = 10 + 8.2 * math.sin(angle)
-            painter.drawLine(int(x1 * 10), int(y1 * 10), int(x2 * 10), int(y2 * 10))
+    if index == 0:  # General: cog
+        points = []
+        for step in range(8):
+            base = math.radians(step * 45)
+            for radius, offset in (
+                (8.3, -9), (8.3, 9), (5.9, 14), (5.9, 31),
+            ):
+                angle = base + math.radians(offset)
+                points.append(QPointF(10 + radius * math.cos(angle),
+                                      10 + radius * math.sin(angle)))
+        gear = QPainterPath(points[0])
+        for point in points[1:]:
+            gear.lineTo(point)
+        gear.closeSubpath()
+        painter.drawPath(gear)
+        painter.drawEllipse(QPointF(10, 10), 2.2, 2.2)
     elif index == 1:  # Your Face
-        painter.drawRoundedRect(3.2, 2.2, 13.6, 15.6, 5.2, 5.2)
-        painter.drawPoint(7.4, 7.8)
-        painter.drawPoint(12.6, 7.8)
-        painter.drawArc(6.6, 9.6, 6.8, 4.6, 200 * 16, 140 * 16)
+        painter.drawRoundedRect(QRectF(3.4, 2.6, 13.2, 14.8), 5.0, 5.0)
+        fill_dot(7.4, 8.4, 0.75)
+        fill_dot(12.6, 8.4, 0.75)
+        painter.drawArc(QRectF(6.4, 9.2, 7.2, 5.0), 200 * 16, 140 * 16)
     elif index == 2:  # Password: key
-        painter.drawEllipse(3.0, 2.8, 6.6, 6.6)
-        painter.drawLine(8.4, 8.2, 16.2, 16.0)
-        painter.drawLine(12.4, 12.2, 14.6, 10.0)
-        painter.drawLine(15.0, 14.8, 17.0, 12.8)
+        painter.drawEllipse(QPointF(6.4, 6.4), 3.4, 3.4)
+        painter.drawLine(QPointF(8.9, 8.9), QPointF(16.6, 16.6))
+        painter.drawLine(QPointF(12.5, 12.5), QPointF(14.3, 10.7))
+        painter.drawLine(QPointF(14.9, 14.9), QPointF(16.6, 13.2))
     elif index == 3:  # Camera
-        painter.drawRoundedRect(2.2, 5.4, 15.6, 11.2, 2.6, 2.6)
-        painter.drawEllipse(7.0, 8.0, 6.0, 6.0)
-        painter.drawLine(7.2, 3.0, 12.8, 3.0)
+        painter.drawRoundedRect(QRectF(2.6, 5.9, 14.8, 10.5), 2.8, 2.8)
+        painter.drawEllipse(QPointF(10, 11.1), 3.0, 3.0)
+        hump = QPainterPath(QPointF(7.1, 5.9))
+        hump.lineTo(8.1, 3.9)
+        hump.lineTo(11.9, 3.9)
+        hump.lineTo(12.9, 5.9)
+        painter.drawPath(hump)
     elif index == 4:  # Recognition: sliders
-        for y, knob in ((5.2, 7.2), (10.0, 13.2), (14.8, 9.0)):
-            painter.drawLine(3.0 * 10, int(y * 10), 17.0 * 10, int(y * 10))
-            painter.drawEllipse(knob - 1.9, y - 1.9, 3.8, 3.8)
+        for y, knob in ((5.4, 7.6), (10.0, 13.0), (14.6, 8.8)):
+            painter.drawLine(QPointF(3.0, y), QPointF(knob - 2.4, y))
+            painter.drawLine(QPointF(knob + 2.4, y), QPointF(17.0, y))
+            painter.drawEllipse(QPointF(knob, y), 1.9, 1.9)
     else:  # About: info
-        painter.drawEllipse(2.2, 2.2, 15.6, 15.6)
-        painter.drawPoint(10.0, 6.4)
-        painter.drawLine(10.0 * 10, 9.0 * 10, 10.0 * 10, 14.0 * 10)
+        painter.drawEllipse(QPointF(10, 10), 7.6, 7.6)
+        fill_dot(10, 6.5, 0.85)
+        painter.drawLine(QPointF(10, 9.3), QPointF(10, 14.2))
     painter.end()
     return QIcon(pixmap)
 
@@ -75,7 +99,7 @@ class NavButton(QPushButton):
         self._index = index
         self.setObjectName("nav")
         self.setCheckable(True)
-        self.setIconSize(QSize(19, 19))
+        self.setIconSize(QSize(20, 20))
         self.setMinimumHeight(38)
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName(text)

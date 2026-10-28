@@ -44,7 +44,8 @@ APP_MUTEX = "Local\\GlanceDesktop"
 
 
 class MainWindow(QMainWindow):
-    MARGIN = 18
+    # The glass fills the window itself; the only transparent pixels left are the
+    # four rounded corners, which are the window's shape rather than a gutter.
     RADIUS = 20
 
     def __init__(self):
@@ -74,9 +75,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("windowRoot")
         self._root_layout = QHBoxLayout(central)
-        self._root_layout.setContentsMargins(
-            self.MARGIN, self.MARGIN, self.MARGIN, self.MARGIN
-        )
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
         self._root_layout.setSpacing(0)
 
         self.stack = QStackedWidget()
@@ -132,16 +131,10 @@ class MainWindow(QMainWindow):
 
     # -- window chrome ----------------------------------------------------
     def _card_rect(self) -> QRect:
-        if self.isMaximized() or self.isFullScreen():
-            return self.rect()
-        return self.rect().adjusted(
-            self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN
-        )
+        return self.rect()
 
     def _apply_frame_mode(self) -> None:
         framed = not (self.isMaximized() or self.isFullScreen())
-        margin = self.MARGIN if framed else 0
-        self._root_layout.setContentsMargins(margin, margin, margin, margin)
         self.nav.setProperty("framed", framed)
         self.nav.style().unpolish(self.nav)
         self.nav.style().polish(self.nav)
@@ -155,9 +148,8 @@ class MainWindow(QMainWindow):
         if controls is None:
             return
         framed = not (self.isMaximized() or self.isFullScreen())
-        margin = self.MARGIN if framed else 0
-        x = self.width() - margin - (12 if framed else 8) - controls.width()
-        y = margin + (6 if framed else 2)
+        x = self.width() - (12 if framed else 8) - controls.width()
+        y = 6 if framed else 2
         controls.move(max(0, x), max(0, y))
 
     def _toggle_zoom(self) -> None:
@@ -188,15 +180,8 @@ class MainWindow(QMainWindow):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         framed = not (self.isMaximized() or self.isFullScreen())
-        if framed:
-            rect = QRectF(self.rect()).adjusted(
-                self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN
-            )
-            radius = float(self.RADIUS)
-            self._paint_shadow(painter, rect, radius)
-        else:
-            rect = QRectF(self.rect())
-            radius = 0.0
+        rect = QRectF(self.rect())
+        radius = float(self.RADIUS) if framed else 0.0
 
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
@@ -208,18 +193,6 @@ class MainWindow(QMainWindow):
         painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(QColor(255, 255, 255, 40), 1))
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-    def _paint_shadow(self, painter: QPainter, rect: QRectF, radius: float) -> None:
-        painter.save()
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 5))
-        for step in range(14, 0, -1):
-            painter.drawRoundedRect(
-                rect.adjusted(-step, -step + 2, step, step + 4),
-                radius + step,
-                radius + step,
-            )
-        painter.restore()
 
     def _edges_at(self, pos) -> Qt.Edge:
         if self.isMaximized() or self.isFullScreen():

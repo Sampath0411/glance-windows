@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import numpy as np
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -39,6 +40,8 @@ from .settings_widgets import (
     SettingsGroup,
     SettingsRow,
 )
+
+REPO_URL = "https://github.com/Sampath0411/glance-windows"
 
 
 def _title(text: str, size: str = "h1") -> QLabel:
@@ -1098,6 +1101,16 @@ class AboutPage(QWidget):
         info.add_row(SettingsRow(
             "Glance",
             f"Face unlock, on your own device.\nVersion {__version__} · Windows 11",
+        ))
+        self.repo_button = QPushButton("GitHub")
+        self.repo_button.setToolTip(REPO_URL)
+        self.repo_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(REPO_URL))
+        )
+        info.add_row(SettingsRow(
+            "Made by",
+            f"Sampath0411\n{REPO_URL.removeprefix('https://')}",
+            self.repo_button,
         ))
         content.addWidget(info)
         content.addWidget(_title("Face models", "h2"))
