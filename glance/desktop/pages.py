@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..core import IdentityStore
 
 from . import backend
@@ -1094,7 +1095,10 @@ class AboutPage(QWidget):
             5,
         ))
         info = SettingsGroup()
-        info.add_row(SettingsRow("Glance", "Face unlock, on your own device.\nVersion 0.1.0 · Windows 11"))
+        info.add_row(SettingsRow(
+            "Glance",
+            f"Face unlock, on your own device.\nVersion {__version__} · Windows 11",
+        ))
         content.addWidget(info)
         content.addWidget(_title("Face models", "h2"))
         self.models_button = QPushButton()

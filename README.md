@@ -99,8 +99,9 @@ approval when Glance needs administrator access.
 | **Face unlock** | Runs after Windows locks. The agent does nothing while the desktop is unlocked. |
 | **Multiple identities** | Enroll several people or several versions of yourself. Exactly one selected identity may authorize an unlock. |
 | **Liveness checks** | Watches for glare and screen-shaped objects, with optional blink confirmation. *Light*, *Heavy*, or off. |
-| **Native Windows** | A real Win32 window with a fixed sidebar, rounded Windows 11 corners, snap, shadows, and the standard title bar. |
-| **Dark navy UI** | Six focused screens: Overview, Your face, Windows sign-in, Camera, Recognition, and About. |
+| **Native Windows** | A real Win32 window: frameless glass shell, grouped sidebar, custom caption buttons, edge resize, snap, and maximise. |
+| **Glass interface** | A painted aurora backdrop under translucent panels, glass setting groups, and Windows-style window controls. |
+| **Six focused screens** | General, Your Face, Password, Camera, Recognition, and About. |
 | **Camera & recognition** | Choose the camera, match threshold, verification timeout, and autostart behavior. |
 | **Fail closed** | No selected identity, a missing credential, a stale grant, or any provider error falls back to the normal Windows password tile. |
 | **Your data, your call** | Edit or delete your enrollment or stored password at any time. |
