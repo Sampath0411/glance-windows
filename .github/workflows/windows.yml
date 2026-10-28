@@ -51,6 +51,7 @@ jobs:
           .venv\Scripts\python.exe -m tests.test_grant
           .venv\Scripts\python.exe -m unittest tests.test_packaging -v
           .venv\Scripts\python.exe -m unittest tests.test_fetch_models -v
+          .venv\Scripts\python.exe -m unittest tests.test_models_runtime -v
           .venv\Scripts\python.exe -m unittest tests.test_packaged_icon -v
           .venv\Scripts\python.exe -m unittest tests.test_collect_notices -v
           .venv\Scripts\python.exe -m unittest tests.test_backend_helper tests.test_admin_helper_policy tests.test_pending_grant tests.test_agent_paths tests.test_agent_startup_diagnostics -v
@@ -59,7 +60,10 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH += ";C:\Program Files (x86)\Inno Setup 6"
-          .\packaging\build_windows.ps1 -BuildInstaller
+          # Artifacts are downloadable from a public repository, so they use the
+          # same model-free configuration as a release; Glance downloads the
+          # InsightFace weights on first run instead of redistributing them.
+          .\packaging\build_windows.ps1 -BuildInstaller -WithoutModels
 
       - name: Upload standalone app and installer artifacts
         uses: actions/upload-artifact@v4
