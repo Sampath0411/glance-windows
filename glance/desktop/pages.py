@@ -463,6 +463,11 @@ class EnrollPage(QWidget):
     def on_camera_failed(self, message: str) -> None:
         self._camera_ready = False
         self._capture_pending = False
+        if not backend.models_ready():
+            message = "Face models are not installed yet."
+            self.retry_camera_button.setText("Download models")
+        else:
+            self.retry_camera_button.setText("Retry camera")
         self.camera_status.setText(message)
         self.camera_status.setStyleSheet(f"color: {DANGER};")
         self.retry_camera_button.show()
@@ -498,6 +503,14 @@ class EnrollPage(QWidget):
             self.quality.setStyleSheet("")
 
     def _retry_camera(self) -> None:
+        if not backend.models_ready():
+            self.camera_status.setText("Face models are not installed yet.")
+            self.camera_status.setStyleSheet(f"color: {WARN};")
+            ModelsDialog(self).exec()
+            if not backend.models_ready():
+                self.retry_camera_button.setText("Download models")
+                return
+        self.retry_camera_button.setText("Retry camera")
         self._camera_ready = False
         self._capture_pending = False
         self.camera_status.setText("Restarting camera…")

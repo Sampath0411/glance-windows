@@ -5,8 +5,11 @@ only builds and uploads temporary artifacts; it never publishes a GitHub Release
 
 - [ ] Build on clean Windows 11 x64 using Python 3.12 x64 and pinned lockfiles.
 - [ ] Run desktop, CLI, liveness, grant, packaging, and model-fetch tests.
-- [ ] Confirm the official model archive size and pinned SHA-256; inspect staged files
-      and include only `det_500m.onnx`, `w600k_mbf.onnx`, and `MODEL.LICENSE`.
+- [ ] Confirm the official model archive size and pinned SHA-256 in `glance/models.py`;
+      a bundled local build may include only `det_500m.onnx`, `w600k_mbf.onnx`, and
+      `MODEL.LICENSE`.
+- [ ] Build the publishable installer with `-WithoutModels` and verify the standalone
+      output and the installer contain no `.onnx` files.
 - [ ] Recheck current InsightFace `buffalo_s` terms and redistribution permissions.
 - [ ] Confirm the installer and notices explicitly disclose non-commercial,
       research-only model restrictions; do not label model weights MIT or
@@ -16,7 +19,8 @@ only builds and uploads temporary artifacts; it never publishes a GitHub Release
       OpenCV, ONNX Runtime, and compiler/runtime components. Resolve all notices
       before publishing.
 - [ ] Install as a non-admin user, verify Start Menu/optional desktop shortcuts,
-      first-run setup, model startup, preview/enrollment, and shutdown.
+      first-run setup and model download into `%LOCALAPPDATA%\Glance\models`,
+      preview/enrollment, and shutdown.
 - [ ] Verify config and identities are written only to
       `%LOCALAPPDATA%\Glance\data`; test upgrade and uninstall preserve user data.
 - [ ] Verify installer does not install/register a credential provider, create
