@@ -72,6 +72,70 @@ The installer copies the credential provider and helper files but does **not** e
 machine-wide face unlock by itself. You enable it inside Glance, and Windows asks for
 approval when Glance needs administrator access.
 
+## Your Windows account
+
+Step 4 needs the account name and password Windows itself asks for at the lock screen. The
+name must match exactly: Glance hands the pair to Windows to verify before anything is
+stored, and a name that resolves to no user comes back as the same `rejected` message as a
+wrong password.
+
+| Sign-in type | Account field |
+|---|---|
+| Microsoft account | `MicrosoftAccount\you@outlook.com` |
+| Local account | `COMPUTERNAME\username`, or `.\username` |
+| Work or school (Entra ID) | `AzureAD\you@company.com` |
+
+Ask Windows for the form instead of guessing:
+
+```powershell
+whoami        # COMPUTERNAME\username for a local account
+whoami /upn   # the email, for a Microsoft or work account
+```
+
+A Microsoft account always takes the **email** after the backslash — never the machine name,
+and never the short profile folder name. `MicrosoftAccount\LAPTOP-1234\Alex` is split as
+domain `MicrosoftAccount` with user `LAPTOP-1234\Alex`, which no account on the PC has.
+
+A Windows Hello **PIN is not the password** and cannot be used here: it never leaves the Hello
+container. If the PC signs in with Hello only, the account first needs a real password.
+
+### If the password is unknown
+
+- **Local account** — an administrator can set a new password without knowing the old one:
+  `net user YOURNAME *`. Windows warns that encrypted files and saved credentials may become
+  inaccessible; that is expected for an administrator reset, and nothing is enrolled in
+  Glance yet. Sign out and back in once afterwards.
+- **Microsoft account** — reset it at <https://account.microsoft.com/security> on a phone,
+  verification via the recovery email or phone number. Then connect the PC to the internet
+  and sign in once with the new password so Windows refreshes its cached copy. A passwordless
+  account needs a password added on that same page before Glance can store anything.
+- **Work or school account** — controlled by your organisation. This build only special-cases
+  Microsoft accounts, so Entra ID sign-ins tend to come back rejected even with the correct
+  password. Use Windows Hello on those PCs.
+
+### Test the pair before opening Glance
+
+In an elevated PowerShell:
+
+```powershell
+& "$env:ProgramFiles\Glance\provider\grant_tool.exe" check --account 'COMPUTERNAME\username'
+```
+
+Type the password at the prompt; it does not echo. `check` verifies only and stores nothing,
+so a mistake here costs nothing. One line comes back:
+
+```
+verify=ok status=0x00000000 sub=0x00000000 mode=trusted
+```
+
+`verify=rejected` with `0xC000006A` is a wrong password, `0xC0000064` means the account field
+names no user, and `0xC0000234` is a lockout. `mode=untrusted` means the helper could not use
+its privileged LSA path, which can reject a correct Microsoft-account password.
+
+Both the helper's flags and the account separator are strict: `--account` with two dashes, one
+space after `check`, and a single backslash in the account. A flag without its dashes is
+reported as a missing `--account`, not as a password problem.
+
 ## Permissions
 
 | Permission | Why |
