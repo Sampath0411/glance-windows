@@ -23,6 +23,7 @@ import glance.agent.glance_agent as glance_agent
 import glance.desktop.backend as backend
 import glance.desktop.theme as theme
 from glance.desktop.onboarding import FirstRunDialog
+from glance.desktop.models_setup import ModelsDialog
 from glance.desktop.settings_widgets import FloatingTabBar, SettingsGroup, SettingsRow
 from glance.desktop.backend import Settings
 from glance.desktop.camera import CameraWorker
@@ -594,6 +595,39 @@ class SettingsIdentityTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no identity named", message)
         stop.assert_not_called()
+
+
+class StartupModelsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_startup_offers_models_before_onboarding(self) -> None:
+        window = MainWindow()
+        order: list[str] = []
+
+        def offer_models(parent=None) -> bool:
+            order.append("models")
+            return True
+
+        with patch.object(ModelsDialog, "ensure_models", side_effect=offer_models), \
+                patch.object(MainWindow, "show_first_run_if_needed",
+                             side_effect=lambda: order.append("onboarding")):
+            window.startup_sequence()
+
+        self.assertEqual(order, ["models", "onboarding"])
+
+    def test_ensure_models_is_silent_when_the_models_are_installed(self) -> None:
+        with patch.object(backend, "models_ready", return_value=True), \
+                patch.object(ModelsDialog, "exec") as shown:
+            self.assertTrue(ModelsDialog.ensure_models())
+        shown.assert_not_called()
+
+    def test_declining_the_download_reports_models_are_missing(self) -> None:
+        with patch.object(backend, "models_ready", return_value=False), \
+                patch.object(ModelsDialog, "exec") as shown:
+            self.assertFalse(ModelsDialog.ensure_models())
+        shown.assert_called_once()
 
 
 class EnrollmentUiTests(unittest.TestCase):
