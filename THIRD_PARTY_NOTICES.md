@@ -13,6 +13,12 @@ library code and Glance source. The weights must not be represented as
 commercially usable or as MIT-licensed. Recheck the current upstream terms and
 redistribution permissions before producing or publishing each installer.
 
+The public installer does not redistribute these weights. Glance downloads the
+official archive from InsightFace on the user's behalf on first run, verifies a
+pinned SHA-256, and keeps the two runtime graphs in the user's local app data.
+A private build may bundle them for local testing; such a build must not be
+published unless InsightFace grants redistribution permission.
+
 Upstream references:
 
 - [InsightFace model zoo and model license terms](https://github.com/deepinsight/insightface/blob/master/python-package/docs/model_zoo.md)
@@ -20,8 +26,9 @@ Upstream references:
 - [InsightFace source repository](https://github.com/deepinsight/insightface)
 
 Glance currently uses only `det_500m.onnx` and `w600k_mbf.onnx` from the
-`buffalo_s` archive. Model binaries are not included in the source repository;
-the Windows build downloads and validates them separately.
+`buffalo_s` archive. Model binaries are not included in the source repository,
+the public installer, or this notice bundle; the build and the app fetch and
+validate them separately.
 
 ## Bundled application dependencies
 

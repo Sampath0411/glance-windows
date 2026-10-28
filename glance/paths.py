@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models import models_present
+
 
 @dataclass(frozen=True)
 class RuntimePaths:
@@ -15,6 +17,8 @@ class RuntimePaths:
     executable_dir: Path
     data_dir: Path
     models_dir: Path
+    bundled_models_dir: Path
+    user_models_dir: Path
     logs_dir: Path
     grant_tool: Path
     agent_executable: Path
@@ -61,6 +65,13 @@ def resolve_paths(
         )
         data_dir = local_app_data / "Glance" / "data"
         resource_root = executable_dir
+        bundled_models_dir = resource_root / "models" / "buffalo_s"
+        user_models_dir = local_app_data / "Glance" / "models" / "buffalo_s"
+        # Installed models win; otherwise use the per-user download location,
+        # which is writable without administrator rights.
+        models_dir = (
+            bundled_models_dir if models_present(bundled_models_dir) else user_models_dir
+        )
         agent_executable = resource_root / "GlanceAgent.exe"
         grant_tool = resource_root / "provider" / "grant_tool.exe"
         provider_dll = resource_root / "provider" / "GlanceProvider.dll"
@@ -68,6 +79,9 @@ def resolve_paths(
     else:
         data_dir = project_root / "data"
         resource_root = project_root
+        bundled_models_dir = resource_root / "models" / "buffalo_s"
+        user_models_dir = bundled_models_dir
+        models_dir = bundled_models_dir
         agent_executable = project_root / ".venv" / "Scripts" / "pythonw.exe"
         grant_tool = project_root / "provider" / "build" / "grant_tool.exe"
         provider_dll = project_root / "provider" / "build" / "GlanceProvider.dll"
@@ -78,7 +92,9 @@ def resolve_paths(
         project_root=project_root,
         executable_dir=executable_dir,
         data_dir=data_dir,
-        models_dir=resource_root / "models" / "buffalo_s",
+        models_dir=models_dir,
+        bundled_models_dir=bundled_models_dir,
+        user_models_dir=user_models_dir,
         logs_dir=Path(r"C:\ProgramData\Glance\logs"),
         grant_tool=grant_tool,
         agent_executable=agent_executable,

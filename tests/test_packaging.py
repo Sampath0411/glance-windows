@@ -76,24 +76,57 @@ class RuntimePathTests(unittest.TestCase):
         self.assertTrue(paths.packaged)
 
     def test_packaged_paths_keep_mutable_data_outside_install_directory(self) -> None:
+        import tempfile
+
         from glance.paths import resolve_paths
 
-        paths = resolve_paths(
-            packaged=True,
-            project_root=Path("C:/source/glance"),
-            executable_dir=Path("C:/Users/test/AppData/Local/Programs/Glance"),
-            local_app_data=Path("C:/Users/test/AppData/Local"),
-        )
-        self.assertEqual(paths.data_dir, Path("C:/Users/test/AppData/Local/Glance/data"))
-        self.assertEqual(
-            paths.models_dir,
-            Path("C:/Users/test/AppData/Local/Programs/Glance/models/buffalo_s"),
-        )
-        self.assertNotEqual(paths.data_dir, paths.executable_dir)
-        self.assertEqual(paths.agent_executable, paths.executable_dir / "GlanceAgent.exe")
-        self.assertEqual(paths.grant_tool, paths.executable_dir / "provider" / "grant_tool.exe")
-        self.assertEqual(paths.provider_dll, paths.executable_dir / "provider" / "GlanceProvider.dll")
-        self.assertEqual(paths.admin_script, paths.executable_dir / "provider" / "GlanceAdmin.ps1")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = root / "Program Files" / "Glance"
+            appdata = root / "AppData" / "Local"
+            paths = resolve_paths(
+                packaged=True,
+                project_root=root / "source",
+                executable_dir=install,
+                local_app_data=appdata,
+            )
+
+            self.assertEqual(paths.data_dir, appdata / "Glance" / "data")
+            # No bundled weights: models are downloaded into the per-user store,
+            # which is writable without administrator rights.
+            self.assertEqual(paths.models_dir, appdata / "Glance" / "models" / "buffalo_s")
+            self.assertEqual(paths.bundled_models_dir, install / "models" / "buffalo_s")
+            self.assertEqual(paths.user_models_dir, paths.models_dir)
+            self.assertNotEqual(paths.data_dir, paths.executable_dir)
+            self.assertEqual(paths.agent_executable, install / "GlanceAgent.exe")
+            self.assertEqual(paths.grant_tool, install / "provider" / "grant_tool.exe")
+            self.assertEqual(paths.provider_dll, install / "provider" / "GlanceProvider.dll")
+            self.assertEqual(paths.admin_script, install / "provider" / "GlanceAdmin.ps1")
+
+    def test_packaged_paths_prefer_models_bundled_with_the_installer(self) -> None:
+        import tempfile
+
+        from glance.paths import resolve_paths
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = root / "Program Files" / "Glance"
+            models = install / "models" / "buffalo_s"
+            models.mkdir(parents=True)
+            for name in ("det_500m.onnx", "w600k_mbf.onnx"):
+                (models / name).write_bytes(b"model")
+
+            paths = resolve_paths(
+                packaged=True,
+                project_root=root / "source",
+                executable_dir=install,
+                local_app_data=root / "AppData" / "Local",
+            )
+
+            self.assertEqual(paths.models_dir, models)
+            self.assertEqual(
+                paths.user_models_dir, root / "AppData" / "Local" / "Glance" / "models" / "buffalo_s"
+            )
 
     def test_source_paths_remain_project_local_and_creation_is_lazy(self) -> None:
         from glance.paths import resolve_paths

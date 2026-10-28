@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from . import backend
 from .camera import CameraWorker
+from .models_setup import ModelsDialog
 from .onboarding import FirstRunDialog
 from .pages import (
     AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog,
@@ -144,6 +145,11 @@ class MainWindow(QMainWindow):
     def show_first_run_if_needed(self) -> None:
         if not FirstRunDialog.is_completed():
             FirstRunDialog(self).exec()
+
+    def startup_sequence(self) -> None:
+        """Ask for the downloadable face models, then show the setup guide."""
+        ModelsDialog.ensure_models(self)
+        self.show_first_run_if_needed()
 
     # -- reactions to changes ---------------------------------------------
     def on_identities_changed(self, name: str) -> None:
@@ -296,7 +302,7 @@ def main() -> int:
     window = MainWindow()
     build_tray(window)
     window.show()
-    QTimer.singleShot(250, window.show_first_run_if_needed)
+    QTimer.singleShot(250, window.startup_sequence)
     return app.exec()
 
 

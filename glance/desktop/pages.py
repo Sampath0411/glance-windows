@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from ..core import IdentityStore
 
 from . import backend
+from .models_setup import ModelsDialog
 from .theme import ACCENT, DANGER, MUTED, WARN, Card, Dot, Preview
 from .settings_widgets import SettingsDivider, SettingsGroup, SettingsRow
 
@@ -1014,6 +1015,14 @@ class AboutPage(QWidget):
         info = SettingsGroup()
         info.add_row(SettingsRow("Glance", "Face unlock, on your own device.\nVersion 0.1.0 · Windows 11"))
         content.addWidget(info)
+        content.addWidget(_title("Face models", "h2"))
+        self.models_button = QPushButton()
+        self.models_button.clicked.connect(self._manage_models)
+        self.models_row = SettingsRow("Face models", "", self.models_button)
+        models = SettingsGroup()
+        models.add_row(self.models_row)
+        content.addWidget(models)
+        self._refresh_models()
         content.addWidget(_title("Diagnostics", "h2"))
         self.open_logs = QPushButton("Open logs")
         self.open_logs.clicked.connect(self._show_logs)
@@ -1029,6 +1038,31 @@ class AboutPage(QWidget):
         self.pages.addWidget(self.content)
         self.pages.addWidget(self.logs)
         layout.addWidget(self.pages)
+
+    def _refresh_models(self) -> None:
+        if backend.models_ready():
+            self.models_row.subtitle.setText(
+                "Installed and checksum-verified in your local app data."
+            )
+            self.models_button.setText("Details")
+        else:
+            self.models_row.subtitle.setText(
+                "Not downloaded yet. Face detection and recognition need them."
+            )
+            self.models_button.setText("Download")
+        self.models_row.subtitle.setVisible(True)
+
+    def _manage_models(self) -> None:
+        if backend.models_ready():
+            QMessageBox.information(
+                self, "Glance",
+                "The InsightFace buffalo_s models are installed.\n\n"
+                f"{backend.PATHS.models_dir}\n\n"
+                "InsightFace licenses these weights for non-commercial research use.",
+            )
+            return
+        ModelsDialog(self).exec()
+        self._refresh_models()
 
     def _show_logs(self) -> None:
         self.logs.refresh()

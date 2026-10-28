@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.grant import clear_pending_grant
+from ..models import models_present, provision_models
 from ..paths import PATHS
 
 DATA = PATHS.data_dir
@@ -469,6 +470,23 @@ def current_user_sid() -> str:
     return match.group(1) if match else ""
 
 
+def models_ready() -> bool:
+    return models_present(PATHS.models_dir)
+
+
+def install_models(progress=None) -> tuple[bool, str]:
+    """Download the InsightFace weights on this user's behalf.
+
+    They are not shipped with Glance; the download is checksum-verified and
+    staged outside the installation directory.
+    """
+    try:
+        provision_models(PATHS.models_dir, progress=progress)
+    except Exception as error:  # network, checksum, disk, or unsafe archive
+        return False, str(error) or "Could not install the face models."
+    return True, str(PATHS.models_dir)
+
+
 def enable_windows_unlock() -> tuple[bool, str]:
     settings = Settings.load()
     if not settings.identity or not any(person["name"] == settings.identity for person in identity_summary(0)):
@@ -477,8 +495,8 @@ def enable_windows_unlock() -> tuple[bool, str]:
         return False, "Glance credential helper is missing. Repair or reinstall Glance."
     if not credential_status(0).get("present"):
         return False, "Verify and save your Windows password before enabling Windows unlock."
-    if not PATHS.models_dir.is_dir():
-        return False, "Glance face models are missing. Repair or reinstall Glance."
+    if not models_present(PATHS.models_dir):
+        return False, "Download the face models in About before enabling Windows unlock."
     sid = current_user_sid()
     if not sid:
         return False, "Could not determine this Windows account SID."

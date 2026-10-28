@@ -2,6 +2,7 @@
 param(
     [switch]$BuildInstaller,
     [switch]$SkipModelDownload,
+    [switch]$WithoutModels,
     [string]$OutputDirectory
 )
 
@@ -49,18 +50,34 @@ foreach ($path in @($packageRoot)) {
     }
 }
 
-if (-not $SkipModelDownload) {
-    Assert-UnderRepo $stage
-    if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    & $python (Join-Path $repo 'tools\fetch_models.py') $stage
-    if ($LASTEXITCODE -ne 0) { throw 'Pinned model download/validation failed.' }
-} elseif (-not (Test-Path $stage)) {
-    throw "Model staging directory is missing: $stage"
+if (-not $WithoutModels) {
+    if (-not $SkipModelDownload) {
+        Assert-UnderRepo $stage
+        if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        & $python (Join-Path $repo 'tools\fetch_models.py') $stage
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned model download/validation failed.' }
+    } elseif (-not (Test-Path $stage)) {
+        throw "Model staging directory is missing: $stage"
+    }
+
+    foreach ($model in @('det_500m.onnx', 'w600k_mbf.onnx', 'MODEL.LICENSE')) {
+        if (-not (Test-Path (Join-Path $stage $model))) { throw "Required staged asset missing: $model" }
+    }
+} else {
+    Write-Host 'Building without model weights; Glance downloads them on first run.'
 }
 
-foreach ($model in @('det_500m.onnx', 'w600k_mbf.onnx', 'MODEL.LICENSE')) {
-    if (-not (Test-Path (Join-Path $stage $model))) { throw "Required staged asset missing: $model" }
+$modelDataArgs = @()
+if (-not $WithoutModels) {
+    $modelDataArgs = @(
+        "--include-data-files=$(Join-Path $stage 'det_500m.onnx')=models/buffalo_s/det_500m.onnx",
+        "--include-data-files=$(Join-Path $stage 'w600k_mbf.onnx')=models/buffalo_s/w600k_mbf.onnx",
+        "--include-data-files=$(Join-Path $stage 'MODEL.LICENSE')=models/buffalo_s/MODEL.LICENSE"
+    )
 }
+$noticeDataArgs = @(
+    "--include-data-files=$(Join-Path $repo 'packaging\MODEL.LICENSE')=licenses/MODEL.LICENSE"
+)
 
 New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 $icon = Join-Path $packageRoot 'Glance.ico'
@@ -87,12 +104,11 @@ $args = @(
     "--output-dir=$packageRoot",
     '--include-module=glance.desktop.main',
     '--include-package=glance',
-    "--include-data-files=$(Join-Path $stage 'det_500m.onnx')=models/buffalo_s/det_500m.onnx",
-    "--include-data-files=$(Join-Path $stage 'w600k_mbf.onnx')=models/buffalo_s/w600k_mbf.onnx",
-    "--include-data-files=$(Join-Path $stage 'MODEL.LICENSE')=models/buffalo_s/MODEL.LICENSE",
     "--include-data-files=$iconSource=assets/GlanceIcon.png",
     $entryPoint
 )
+$args += $modelDataArgs
+$args += $noticeDataArgs
 & $python @args
 if ($LASTEXITCODE -ne 0) { throw 'Nuitka standalone build failed.' }
 
@@ -104,11 +120,10 @@ $agentArgs = @(
     "--file-version=$appVersion", "--product-version=$appVersion",
     '--file-description=Glance face verification agent',
     "--output-dir=$packageRoot", '--include-package=glance',
-    "--include-data-files=$(Join-Path $stage 'det_500m.onnx')=models/buffalo_s/det_500m.onnx",
-    "--include-data-files=$(Join-Path $stage 'w600k_mbf.onnx')=models/buffalo_s/w600k_mbf.onnx",
-    "--include-data-files=$(Join-Path $stage 'MODEL.LICENSE')=models/buffalo_s/MODEL.LICENSE",
     $agentEntry
 )
+$agentArgs += $modelDataArgs
+$agentArgs += $noticeDataArgs
 & $python @agentArgs
 if ($LASTEXITCODE -ne 0) { throw 'Standalone agent build failed.' }
 
@@ -119,10 +134,21 @@ Copy-Item -LiteralPath $icon -Destination (Join-Path $distribution 'Glance.ico')
 if (-not (Test-Path (Join-Path $distribution 'assets\GlanceIcon.png'))) {
     throw 'Standalone output is missing the approved app artwork.'
 }
-foreach ($asset in @('det_500m.onnx', 'w600k_mbf.onnx', 'MODEL.LICENSE')) {
-    if (-not (Test-Path (Join-Path $distribution "models\buffalo_s\$asset"))) {
-        throw "Standalone output is missing $asset"
+if (-not $WithoutModels) {
+    foreach ($asset in @('det_500m.onnx', 'w600k_mbf.onnx', 'MODEL.LICENSE')) {
+        if (-not (Test-Path (Join-Path $distribution "models\buffalo_s\$asset"))) {
+            throw "Standalone output is missing $asset"
+        }
     }
+} else {
+    foreach ($asset in @('det_500m.onnx', 'w600k_mbf.onnx')) {
+        if (Test-Path (Join-Path $distribution "models\buffalo_s\$asset")) {
+            throw "A model-free build unexpectedly contains $asset"
+        }
+    }
+}
+if (-not (Test-Path (Join-Path $distribution 'licenses\MODEL.LICENSE'))) {
+    throw 'Standalone output is missing the upstream model notice.'
 }
 $agentDistribution = Join-Path $packageRoot 'launch_agent.dist'
 $agentExecutable = Join-Path $agentDistribution 'GlanceAgent.exe'

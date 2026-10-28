@@ -109,12 +109,26 @@ try {
             $userData = Join-Path $profile 'AppData\Local\Glance\data'
             foreach ($required in @(
                 $providerSource, $grantTool, $agent,
-                (Join-Path $installRoot 'models\buffalo_s\det_500m.onnx'),
-                (Join-Path $installRoot 'models\buffalo_s\w600k_mbf.onnx'),
                 (Join-Path $userData 'agent_config.json'),
                 (Join-Path $userData 'identities.json')
             )) {
                 if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required setup file is missing: $required" }
+            }
+
+            # Models ship with some builds; otherwise Glance downloaded them into
+            # this user's local app data on first run.
+            $modelDirs = @(
+                (Join-Path $installRoot 'models\buffalo_s'),
+                (Join-Path $profile 'AppData\Local\Glance\models\buffalo_s')
+            )
+            foreach ($model in @('det_500m.onnx', 'w600k_mbf.onnx')) {
+                $found = $false
+                foreach ($dir in $modelDirs) {
+                    if (Test-Path -LiteralPath (Join-Path $dir $model) -PathType Leaf) { $found = $true }
+                }
+                if (-not $found) {
+                    throw "Required face model is missing: $model. Download the models in Glance first."
+                }
             }
 
             $config = Get-Content -LiteralPath (Join-Path $userData 'agent_config.json') -Raw | ConvertFrom-Json

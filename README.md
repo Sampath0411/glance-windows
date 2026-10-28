@@ -61,9 +61,12 @@ warning.
 After installation:
 
 1. Open **Glance** from Start.
-2. Enroll your face.
-3. Verify and save your Windows password.
-4. Turn on **Face unlock** for the Windows lock screen.
+2. Let Glance download the face models (~16 MB) when it asks. They come from
+   InsightFace's official release, are checksum-verified, and are stored in
+   `%LOCALAPPDATA%\Glance\models` — the installer does not redistribute them.
+3. Enroll your face.
+4. Verify and save your Windows password.
+5. Turn on **Face unlock** for the Windows lock screen.
 
 The installer copies the credential provider and helper files but does **not** enable
 machine-wide face unlock by itself. You enable it inside Glance, and Windows asks for
@@ -190,7 +193,7 @@ cues abstain until a head-yaw source is added.
    .venv\Scripts\python.exe -m pip install -r requirements-lock.txt -r requirements-build.txt
    ```
 
-3. Fetch the face models:
+3. Fetch the face models (optional; the app offers to download them on first launch):
 
    ```powershell
    .venv\Scripts\python.exe tools\fetch_models.py models\buffalo_s
@@ -205,11 +208,16 @@ cues abstain until a head-yaw source is added.
 ### Build the installer
 
 ```powershell
+# Publishable: ships no weights; the app downloads them on first run.
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -BuildInstaller -WithoutModels
+
+# Local testing: bundles the weights into the app for offline use.
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -BuildInstaller
 ```
 
-Installers and unpacked builds are written to `dist\` and `build\`. The build downloads and
-validates the model weights; they are not stored in the repository.
+Installers and unpacked builds are written to `dist\` and `build\`. A bundled build must not
+be published without redistribution permission from InsightFace; `-WithoutModels` is the
+release configuration.
 
 ### Run the tests
 
