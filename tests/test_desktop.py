@@ -156,6 +156,13 @@ class AdaptiveThemeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
+    def test_settings_row_accepts_a_subtitle_set_after_construction(self) -> None:
+        row = SettingsRow("InsightFace buffalo_s", "")
+        row.subtitle.setText("Installed and checksum-verified.")
+        row.subtitle.setVisible(True)
+        self.assertFalse(row.subtitle.isHidden())
+        self.assertEqual(row.subtitle.text(), "Installed and checksum-verified.")
+
     def test_light_and_dark_themes_have_distinct_surfaces(self) -> None:
         self.assertTrue(hasattr(theme, "resolve_theme"), "theme resolver is not implemented")
         light = theme.resolve_theme("light")

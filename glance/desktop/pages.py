@@ -1031,7 +1031,7 @@ class AboutPage(QWidget):
         content.addWidget(_title("Face models", "h2"))
         self.models_button = QPushButton()
         self.models_button.clicked.connect(self._manage_models)
-        self.models_row = SettingsRow("Face models", "", self.models_button)
+        self.models_row = SettingsRow("InsightFace buffalo_s", "", self.models_button)
         models = SettingsGroup()
         models.add_row(self.models_row)
         content.addWidget(models)

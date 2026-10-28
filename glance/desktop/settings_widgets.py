@@ -54,8 +54,8 @@ class SettingsRow(QWidget):
         self.subtitle.setObjectName("muted")
         self.subtitle.setWordWrap(True)
         self.subtitle.setVisible(bool(subtitle))
-        if subtitle:
-            labels.addWidget(self.subtitle)
+        # Always in the layout so callers can fill in a status later.
+        labels.addWidget(self.subtitle)
         row.addLayout(labels, 1)
         self.trailing_host = QWidget()
         self.trailing_layout = QHBoxLayout(self.trailing_host)
