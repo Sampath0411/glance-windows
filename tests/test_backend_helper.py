@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import desktop.backend as backend
+import glance.desktop.backend as backend
 
 
 class PasswordHelperTests(unittest.TestCase):
@@ -26,8 +26,8 @@ class PasswordHelperTests(unittest.TestCase):
             return True
 
         return (
-            patch("desktop.backend.tempfile.gettempdir", return_value=str(root)),
-            patch("desktop.backend.secrets.token_hex", return_value="abc123"),
+            patch("glance.desktop.backend.tempfile.gettempdir", return_value=str(root)),
+            patch("glance.desktop.backend.secrets.token_hex", return_value="abc123"),
             patch.object(backend._shell32, "ShellExecuteExW", side_effect=launch),
             patch.object(backend._kernel32, "WaitForSingleObject", return_value=wait_result),
             patch.object(backend._kernel32, "GetExitCodeProcess", side_effect=get_exit_code),

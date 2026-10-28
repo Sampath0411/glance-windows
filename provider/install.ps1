@@ -102,7 +102,7 @@ if ($SkipEnroll) {
 Step 'choosing which identity may unlock this account'
 $storePath = Join-Path $repo 'data\identities.json'
 if (-not (Test-Path $storePath)) {
-    throw "no enrolment at $storePath - enrol a face first (run.bat option 1)"
+    throw "no enrolment at $storePath - enrol a face first (scripts\run.bat option 1)"
 }
 $names = (Get-Content $storePath -Raw | ConvertFrom-Json).identities |
     ForEach-Object { $_.name }
@@ -149,7 +149,7 @@ Good 'registered: provider entry, filter entry, CLSID + InprocServer32'
 if (-not $NoAutostart) {
     Step 'registering the agent to start at logon'
     $pythonw = Join-Path $repo '.venv\Scripts\pythonw.exe'
-    $agent = Join-Path $repo 'agent\glance_agent.py'
+    $agent = Join-Path $repo 'scripts\launch_agent.py'
     if (-not (Test-Path $pythonw)) {
         Warn "pythonw not found at $pythonw - skipping autostart"
     } else {
@@ -191,7 +191,7 @@ Write-Host 'Installed.' -ForegroundColor Green
 Write-Host ''
 Write-Host 'Try it:' -ForegroundColor White
 Write-Host '  1. start the agent if it is not running:'
-Write-Host "     $repo\.venv\Scripts\python.exe $repo\agent\glance_agent.py --identity $Identity"
+Write-Host "     $repo\.venv\Scripts\python.exe $repo\scripts\launch_agent.py --identity $Identity"
 Write-Host '  2. press Win+L, look at the camera'
 Write-Host ''
 Write-Host 'If the Face tile never appears, or login misbehaves:' -ForegroundColor Yellow

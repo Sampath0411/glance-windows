@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.grant import clear_pending_grant
+from glance.agent.grant import clear_pending_grant
 
 
 class PendingGrantTests(unittest.TestCase):

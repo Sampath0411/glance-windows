@@ -8,8 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import agent.glance_agent as glance_agent
-from desktop.paths import resolve_paths
+import glance.agent.glance_agent as glance_agent
+from glance.paths import resolve_paths
 
 
 class AgentPathTests(unittest.TestCase):
@@ -23,9 +23,9 @@ class NoLooseGrant(importlib.abc.MetaPathFinder):
         if fullname == "grant":
             raise ModuleNotFoundError("No module named 'grant'")
 sys.meta_path.insert(0, NoLooseGrant())
-import agent.glance_agent as ga
-import agent.grant
-assert ga.grant_mod is agent.grant
+import glance.agent.glance_agent as ga
+import glance.agent.grant
+assert ga.grant_mod is glance.agent.grant
 '''
         result = subprocess.run(
             [sys.executable, "-c", script],

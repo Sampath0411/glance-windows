@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.startup_diagnostics import run_agent
+from glance.agent.startup_diagnostics import run_agent
 
 
 class AgentStartupDiagnosticsTests(unittest.TestCase):

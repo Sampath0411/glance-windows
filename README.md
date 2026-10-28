@@ -43,13 +43,15 @@ the lock screen stays Windows' own.
 
 ## Installation
 
+<p align="center">
+  <a href="https://github.com/Sampath0411/glance-windows/releases"><img width="300" src="assets/GlanceDownload.png" alt="Download for Windows" /></a>
+</p>
+
 **Requirements:**
 
 - Windows 11 x64
 - A webcam
 - Administrator approval for installation and for enabling the credential provider
-
-<a href="https://github.com/Sampath0411/glance-windows/releases"><img width="200" src="https://img.shields.io/badge/Download-Windows%2011-2f81f7?style=for-the-badge&logo=windows11&logoColor=white" alt="Download for Windows" /></a>
 
 Run `GlanceSetup.exe` and follow the installer. Glance installs its protected components
 under `%ProgramFiles%\Glance`; the app and face agent themselves run unelevated. The
@@ -208,6 +210,40 @@ powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -BuildInsta
 
 Installers and unpacked builds are written to `dist\` and `build\`. The build downloads and
 validates the model weights; they are not stored in the repository.
+
+### Run the tests
+
+```powershell
+.venv\Scripts\python.exe -m tests.test_desktop
+.venv\Scripts\python.exe -m tests.test_cli
+.venv\Scripts\python.exe -m tests.test_liveness
+.venv\Scripts\python.exe -m tests.test_grant
+.venv\Scripts\python.exe -m unittest tests.test_packaging -v
+.venv\Scripts\python.exe -m unittest tests.test_backend_helper tests.test_admin_helper_policy tests.test_pending_grant tests.test_agent_paths tests.test_agent_startup_diagnostics -v
+.venv\Scripts\python.exe -m unittest tests.test_fetch_models tests.test_packaged_icon tests.test_collect_notices -v
+```
+
+The interactive developer menu lives in `scripts\run.bat`.
+
+### Project structure
+
+```
+glance/              application package
+  core.py            face detection, alignment, and recognition
+  liveness.py        anti-spoof cues
+  paths.py           source and installed path resolution
+  agent/             lock-screen verification agent
+  desktop/           PySide6 desktop UI
+  cli/               enrollment, evaluation, and repair commands
+tests/               regression suites
+scripts/             source launchers and the developer menu
+tools/               model, icon, and notice build utilities
+tools/diagnostics/   developer probes and diagnostics
+packaging/           Nuitka build, Inno Setup script, notices
+provider/            C++ credential provider and grant helper
+assets/              approved app artwork
+docs/                release checklist
+```
 
 ## Contributing
 

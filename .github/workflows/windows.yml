@@ -45,15 +45,15 @@ jobs:
       - name: Run source regression suites
         shell: pwsh
         run: |
-          .venv\Scripts\python.exe test_desktop.py
-          .venv\Scripts\python.exe test_cli.py
-          .venv\Scripts\python.exe test_liveness.py
-          .venv\Scripts\python.exe test_grant.py
-          .venv\Scripts\python.exe -m unittest test_packaging -v
+          .venv\Scripts\python.exe -m tests.test_desktop
+          .venv\Scripts\python.exe -m tests.test_cli
+          .venv\Scripts\python.exe -m tests.test_liveness
+          .venv\Scripts\python.exe -m tests.test_grant
+          .venv\Scripts\python.exe -m unittest tests.test_packaging -v
           .venv\Scripts\python.exe -m unittest tests.test_fetch_models -v
           .venv\Scripts\python.exe -m unittest tests.test_packaged_icon -v
           .venv\Scripts\python.exe -m unittest tests.test_collect_notices -v
-          .venv\Scripts\python.exe -m unittest tests.test_backend_helper tests.test_admin_helper_policy tests.test_pending_grant tests.test_agent_paths -v
+          .venv\Scripts\python.exe -m unittest tests.test_backend_helper tests.test_admin_helper_policy tests.test_pending_grant tests.test_agent_paths tests.test_agent_startup_diagnostics -v
 
       - name: Build standalone app, agent, provider and protected installer
         shell: pwsh
