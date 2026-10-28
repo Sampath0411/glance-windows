@@ -1,4 +1,4 @@
-"""Palette, stylesheet and the two or three painted widgets the app needs."""
+"""Palette, glass stylesheet, painted backdrop and the shared widgets."""
 
 from __future__ import annotations
 
@@ -6,134 +6,377 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from string import Template
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import QApplication, QFrame, QWidget
 
-BG = "#101a2b"
-PANEL = "#162338"
-PANEL_ALT = "#0e1727"
-BORDER = "#26364e"
-TEXT = "#e6edf3"
-MUTED = "#8b98a8"
-ACCENT = "#82b4ff"
-WARN = "#e3b341"
-DANGER = "#f85149"
-BLUE = "#4c8dff"
+BG = "#0a0f16"
+PANEL = "#111923"
+PANEL_ALT = "#0c131c"
+BORDER = "#233040"
+TEXT = "#eef3fa"
+MUTED = "#9aa9bd"
+ACCENT = "#4c9dff"
+WARN = "#e6b95c"
+DANGER = "#ff6b6b"
+BLUE = "#4c9dff"
 
-STYLESHEET = f"""
-QWidget {{
-    background: {BG};
-    color: {TEXT};
-    font-family: "Segoe UI Variable Text", "Segoe UI";
+
+@dataclass(frozen=True)
+class Palette:
+    background: str
+    foreground: str
+    muted: str
+    faint: str
+    panel: str
+    card_top: str
+    card_bottom: str
+    surface: str
+    surface_hover: str
+    surface_pressed: str
+    border: str
+    border_strong: str
+    field: str
+    sidebar: str
+    nav_selected: str
+    accent: str
+    accent_hi: str
+    accent_text: str
+    danger: str
+    warn: str
+
+
+DARK = Palette(
+    background=BG,
+    foreground=TEXT,
+    muted="#9aa9bd",
+    faint="rgba(170, 186, 206, 0.62)",
+    panel="#101823",
+    card_top="rgba(255, 255, 255, 0.085)",
+    card_bottom="rgba(255, 255, 255, 0.032)",
+    surface="rgba(255, 255, 255, 0.075)",
+    surface_hover="rgba(255, 255, 255, 0.125)",
+    surface_pressed="rgba(255, 255, 255, 0.055)",
+    border="rgba(255, 255, 255, 0.10)",
+    border_strong="rgba(255, 255, 255, 0.16)",
+    field="rgba(255, 255, 255, 0.065)",
+    sidebar="rgba(14, 22, 34, 0.52)",
+    nav_selected="rgba(255, 255, 255, 0.09)",
+    accent=ACCENT,
+    accent_hi="#74b4ff",
+    accent_text="#ffffff",
+    danger=DANGER,
+    warn=WARN,
+)
+
+LIGHT = Palette(
+    background="#eef2f7",
+    foreground="#0d1622",
+    muted="#5a6778",
+    faint="rgba(60, 76, 96, 0.60)",
+    panel="#f7f9fc",
+    card_top="rgba(255, 255, 255, 0.92)",
+    card_bottom="rgba(248, 251, 255, 0.80)",
+    surface="rgba(255, 255, 255, 0.80)",
+    surface_hover="rgba(255, 255, 255, 0.98)",
+    surface_pressed="rgba(236, 242, 249, 0.92)",
+    border="rgba(12, 24, 38, 0.10)",
+    border_strong="rgba(12, 24, 38, 0.18)",
+    field="rgba(255, 255, 255, 0.88)",
+    sidebar="rgba(243, 247, 252, 0.72)",
+    nav_selected="rgba(12, 24, 38, 0.08)",
+    accent="#2f7fe8",
+    accent_hi="#5aa2f2",
+    accent_text="#ffffff",
+    danger="#c0392b",
+    warn="#9a6b00",
+)
+
+STYLESHEET_TEMPLATE = Template(
+    """
+QWidget {
+    color: $foreground;
+    font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
     font-size: 13px;
-}}
-QFrame#card {{
-    background: {PANEL};
-    border: 1px solid {BORDER};
-    border-radius: 12px;
-}}
-QFrame#sidebar {{
-    background: {PANEL};
+}
+QMainWindow { background: transparent; }
+QDialog, QMessageBox {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #0d1723, stop:1 #091019);
+    border: 1px solid $border;
+}
+QFrame#card, QFrame#settingsGroup {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $card_top, stop:1 $card_bottom);
+    border: 1px solid $border;
+    border-radius: 16px;
+}
+QFrame#sidebar {
+    background: $sidebar;
     border: none;
-    border-right: 1px solid {BORDER};
-}}
-QFrame#settingsGroup {{
-    background: {PANEL}; border: 1px solid {BORDER}; border-radius: 14px;
-}}
-QFrame#settingsDivider {{ background: {BORDER}; border: none; max-height: 1px; }}
-QWidget#floatingTabBar {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 19px; }}
-QPushButton#tab {{ background: transparent; border: none; color: {MUTED}; padding: 8px 7px; border-radius: 15px; }}
-QPushButton#tab:hover {{ background: #151c26; color: {TEXT}; }}
-QPushButton#tab:checked {{ background: #1b2431; color: {TEXT}; font-weight: 600; }}
-QLabel#rowTitle {{ font-size: 13px; font-weight: 500; }}
-QLabel#h1 {{ font-size: 21px; font-weight: 600; }}
-QLabel#h2 {{ font-size: 14px; font-weight: 600; }}
-QLabel#big {{ font-size: 19px; font-weight: 600; }}
-QLabel#mono {{ font-family: Consolas, "Cascadia Mono"; font-size: 12px; color: {MUTED}; }}
-QLabel#muted {{ color: {MUTED}; }}
-QLabel#brand {{ font-size: 17px; font-weight: 700; letter-spacing: 1px; }}
-QPushButton {{
-    background: #1b2431;
-    border: 1px solid #2a3543;
+    border-right: 1px solid $border;
+    border-top-left-radius: 20px;
+    border-bottom-left-radius: 20px;
+}
+QFrame#sidebar[framed="false"] {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+QFrame#statusPill {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QLabel#statusText { color: $muted; font-size: 12px; font-weight: 500; }
+QWidget#settingsRow { background: transparent; }
+QFrame#settingsDivider { background: $border; border: none; }
+QLabel { background: transparent; }
+QLabel#h1 { font-size: 20px; font-weight: 600; }
+QLabel#h2 { font-size: 13px; font-weight: 600; padding-top: 4px; }
+QLabel#big { font-size: 18px; font-weight: 600; }
+QLabel#rowTitle { font-size: 13px; font-weight: 500; }
+QLabel#body { font-size: 13px; color: $foreground; }
+QLabel#muted { color: $muted; font-size: 12px; }
+QLabel#pageSub { color: $muted; font-size: 13px; }
+QLabel#mono {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12px;
+    color: $muted;
+}
+QLabel#brand { font-size: 15px; font-weight: 600; }
+QLabel#brandMeta { font-size: 10px; font-weight: 500; color: $faint; }
+QLabel#navSection {
+    color: $faint;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 14px 12px 5px 12px;
+}
+QPushButton {
+    background: $surface;
+    color: $foreground;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 8px 14px;
+    font-weight: 500;
+}
+QPushButton:hover { background: $surface_hover; }
+QPushButton:pressed { background: $surface_pressed; }
+QPushButton:disabled {
+    color: $faint;
+    background: transparent;
+    border-color: $border;
+}
+QPushButton:flat {
+    background: transparent;
+    border: none;
+    padding: 2px;
+    color: $accent;
+}
+QPushButton:flat:hover { color: $accent_hi; }
+QPushButton#primary {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $accent_hi, stop:1 $accent);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    color: $accent_text;
+    font-weight: 600;
+}
+QPushButton#primary:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #8ac2ff, stop:1 $accent_hi);
+}
+QPushButton#primary:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $accent, stop:1 #2d6fd0);
+}
+QPushButton#primary:disabled {
+    background: rgba(76, 157, 255, 0.18);
+    border-color: transparent;
+    color: rgba(255, 255, 255, 0.42);
+}
+QPushButton#danger {
+    background: transparent;
+    color: $danger;
+    border: 1px solid rgba(255, 107, 107, 0.28);
+}
+QPushButton#danger:hover { background: rgba(255, 107, 107, 0.10); }
+QPushButton#nav {
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: $muted;
+    font-weight: 500;
+}
+QPushButton#nav:hover {
+    background: rgba(255, 255, 255, 0.055);
+    color: $foreground;
+}
+QPushButton#nav:checked {
+    background: $nav_selected;
+    border-color: $border;
+    color: $foreground;
+    font-weight: 600;
+}
+QPushButton#winClose, QPushButton#winMin, QPushButton#winZoom {
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+}
+QPushButton#winClose { background: #ff5f57; }
+QPushButton#winClose:hover { background: #ff837d; }
+QPushButton#winMin { background: #febc2e; }
+QPushButton#winMin:hover { background: #ffd066; }
+QPushButton#winZoom { background: #28c840; }
+QPushButton#winZoom:hover { background: #5cdd70; }
+QLineEdit, QSpinBox, QComboBox {
+    background: $field;
+    border: 1px solid $border;
+    border-radius: 9px;
+    padding: 7px 10px;
+    color: $foreground;
+    selection-background-color: $accent;
+}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+    border-color: rgba(76, 157, 255, 0.75);
+}
+QComboBox::drop-down { border: none; width: 24px; }
+QComboBox QAbstractItemView {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 4px;
+    selection-background-color: rgba(76, 157, 255, 0.30);
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    background: transparent;
+    border: none;
+    width: 18px;
+}
+QSpinBox::up-arrow, QSpinBox::down-arrow { image: none; width: 0; height: 0; }
+QCheckBox { spacing: 8px; background: transparent; }
+QCheckBox::indicator {
+    width: 17px;
+    height: 17px;
+    border-radius: 5px;
+    border: 1px solid $border_strong;
+    background: $field;
+}
+QCheckBox::indicator:hover { border-color: rgba(76, 157, 255, 0.65); }
+QCheckBox::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $accent_hi, stop:1 $accent);
+    border-color: rgba(255, 255, 255, 0.30);
+}
+QSlider::groove:horizontal {
+    height: 5px;
+    background: rgba(255, 255, 255, 0.13);
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
+QSlider::handle:horizontal {
+    background: #ffffff;
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
     border-radius: 8px;
-    padding: 7px 14px;
-}}
-QPushButton:hover {{ background: #212c3a; }}
-QPushButton:pressed {{ background: #182231; }}
-QPushButton:disabled {{ color: #5b6675; border-color: #1d2634; }}
-QPushButton#primary {{
-    background: {ACCENT}; color: #06110a; border: none; font-weight: 600;
-}}
-QPushButton#primary:hover {{ background: #46e58a; }}
-QPushButton#primary:disabled {{ background: #23392c; color: #6d7f74; }}
-QPushButton#danger {{ color: {DANGER}; border-color: #46262a; background: transparent; }}
-QPushButton#danger:hover {{ background: #2a1719; }}
-QPushButton#nav {{
-    text-align: left; padding: 9px 12px; border: none; border-radius: 8px;
-    background: transparent; color: {MUTED};
-}}
-QPushButton#nav:hover {{ background: #151c26; color: {TEXT}; }}
-QPushButton#nav:checked {{ background: #16241c; color: {ACCENT}; font-weight: 600; }}
-QLineEdit, QSpinBox, QComboBox {{
-    background: {PANEL_ALT}; border: 1px solid {BORDER}; border-radius: 8px;
-    padding: 7px 10px; selection-background-color: {ACCENT};
-}}
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox QAbstractItemView {{
-    background: {PANEL}; border: 1px solid {BORDER};
-    selection-background-color: #1c2a22;
-}}
-QSlider::groove:horizontal {{ height: 4px; background: {BORDER}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
-QSlider::handle:horizontal {{
-    background: {TEXT}; width: 14px; height: 14px; margin: -6px 0; border-radius: 7px;
-}}
-QPlainTextEdit {{
-    background: {PANEL_ALT}; border: 1px solid {BORDER}; border-radius: 10px;
-    font-family: Consolas, "Cascadia Mono"; font-size: 12px;
-}}
-QCheckBox::indicator {{
-    width: 16px; height: 16px; border-radius: 4px;
-    border: 1px solid #2a3543; background: {PANEL_ALT};
-}}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
-QScrollArea {{ border: none; background: transparent; }}
-QScrollArea > QWidget > QWidget {{ background: transparent; }}
-QToolTip {{ background: #1b2431; color: {TEXT}; border: 1px solid #2a3543; }}
-QMessageBox {{ background: {PANEL}; }}
-QProgressBar {{
-    background: {PANEL_ALT}; border: 1px solid {BORDER}; border-radius: 6px;
-    text-align: center; height: 8px;
-}}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
+}
+QProgressBar {
+    background: rgba(255, 255, 255, 0.10);
+    border: none;
+    border-radius: 5px;
+    height: 8px;
+}
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 $accent, stop:1 #7fd6ff);
+    border-radius: 5px;
+}
+QPlainTextEdit {
+    background: rgba(0, 0, 0, 0.26);
+    border: 1px solid $border;
+    border-radius: 12px;
+    padding: 10px;
+    color: #d7e3f2;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12px;
+}
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QAbstractScrollArea::corner { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.16);
+    min-height: 32px;
+    border-radius: 3px;
+}
+QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.28); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+QToolTip {
+    background: $panel;
+    color: $foreground;
+    border: 1px solid $border;
+    padding: 6px 8px;
+    border-radius: 8px;
+}
+QMenu {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 10px;
+    padding: 6px;
+}
+QMenu::item { padding: 6px 18px; border-radius: 6px; }
+QMenu::item:selected { background: rgba(76, 157, 255, 0.24); }
+QMenu::separator {
+    height: 1px;
+    margin: 5px 8px;
+    background: $border;
+}
 """
+)
 
-STYLESHEET += f"""
-QLabel, QCheckBox, QWidget#settingsRow {{ background: transparent; }}
-QLabel#h1 {{ font-size: 27px; font-weight: 600; }}
-QLabel#h2 {{ font-size: 14px; font-weight: 600; margin-top: 8px; }}
-QLabel#big {{ font-size: 22px; font-weight: 600; }}
-QLabel#brand {{ font-size: 25px; padding: 0px 12px; color: {TEXT}; }}
-QLabel#sidebarFooter {{ font-size: 11px; color: {MUTED}; padding: 12px; }}
-QFrame#sidebar {{ background: {PANEL_ALT}; border-right: 1px solid {BORDER}; }}
-QPushButton#nav {{ padding: 10px 12px; border-radius: 6px; }}
-QPushButton#nav:checked {{ background: #203859; color: {ACCENT}; }}
-QPushButton#nav:hover {{ background: #1b2c45; }}
-QPushButton {{ padding: 9px 16px; border-radius: 6px; background: #1c2d46; border-color: {BORDER}; }}
-QPushButton:hover {{ background: #273e5d; }}
-QPushButton#primary {{ background: {ACCENT}; color: #0c1930; }}
-QPushButton#primary:hover {{ background: #a2c8ff; }}
-QPushButton#primary:disabled {{ background: #2b3c55; color: #8493a8; }}
-QFrame#card, QFrame#settingsGroup {{ border-radius: 9px; }}
-QLineEdit, QSpinBox, QComboBox {{ padding: 9px; border-radius: 6px; }}
-QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
-QScrollBar::handle:vertical {{ background: #344660; min-height: 28px; border-radius: 4px; }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-"""
+
+def build_stylesheet(palette: Palette) -> str:
+    return STYLESHEET_TEMPLATE.substitute(
+        background=palette.background,
+        foreground=palette.foreground,
+        muted=palette.muted,
+        faint=palette.faint,
+        panel=palette.panel,
+        card_top=palette.card_top,
+        card_bottom=palette.card_bottom,
+        surface=palette.surface,
+        surface_hover=palette.surface_hover,
+        surface_pressed=palette.surface_pressed,
+        border=palette.border,
+        border_strong=palette.border_strong,
+        field=palette.field,
+        sidebar=palette.sidebar,
+        nav_selected=palette.nav_selected,
+        accent=palette.accent,
+        accent_hi=palette.accent_hi,
+        accent_text=palette.accent_text,
+        danger=palette.danger,
+        warn=palette.warn,
+    )
+
+
+STYLESHEET = build_stylesheet(DARK)
 
 
 @dataclass(frozen=True)
@@ -146,40 +389,9 @@ class ResolvedTheme:
 
 
 def resolve_theme(appearance: str) -> ResolvedTheme:
-    """Resolve a low-cost light or dark theme without runtime blur effects."""
-    if appearance.lower() != "light":
-        return ResolvedTheme(BG, TEXT, STYLESHEET)
-
-    replacements = {
-        BG: "#f5f5f7",
-        PANEL: "#ffffff",
-        PANEL_ALT: "#f0f0f2",
-        BORDER: "#d2d2d7",
-        TEXT: "#1d1d1f",
-        MUTED: "#6e6e73",
-        "#1b2431": "#e8e8ed",
-        "#2a3543": "#d2d2d7",
-        "#212c3a": "#dedee3",
-        "#182231": "#ebebef",
-        "#5b6675": "#99999f",
-        "#1d2634": "#dedee3",
-        "#46e58a": "#2ac769",
-        "#23392c": "#cfe8d6",
-        "#6d7f74": "#52735c",
-        "#46262a": "#f1d0d0",
-        "#2a1719": "#f8e7e7",
-        "#151c26": "#e9e9ed",
-        "#16241c": "#e0f2e6",
-        "#0e141c": "#ffffff",
-        "#1c2a22": "#dff0e5",
-        "#080b0f": "#e5e5e7",
-        "#151c26": "#e9e9ed",
-        "#1b2431": "#e8e8ed",
-    }
-    stylesheet = STYLESHEET
-    for dark, light in replacements.items():
-        stylesheet = stylesheet.replace(dark, light)
-    return ResolvedTheme("#f5f5f7", "#1d1d1f", stylesheet)
+    """Resolve a light or dark glass theme; no runtime effects are involved."""
+    palette = DARK if appearance.lower() != "light" else LIGHT
+    return ResolvedTheme(palette.background, palette.foreground, build_stylesheet(palette))
 
 
 def windows_appearance() -> str:
@@ -197,8 +409,116 @@ def windows_appearance() -> str:
         return "light" if QApplication.palette().window().color().lightness() > 128 else "dark"
 
 
+# --------------------------------------------------------------------------- #
+# painted backdrop
+# --------------------------------------------------------------------------- #
+def paint_backdrop(painter: QPainter, rect: QRectF, *, shade: float = 1.0) -> None:
+    """Paint the liquid-glass field the translucent panels sit over.
+
+    The field is built from layered radial gradients and a few diagonal light
+    shards, so the window keeps its depth on any desktop and in screenshots.
+    """
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    base = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    base.setColorAt(0.0, QColor(9, 16, 25))
+    base.setColorAt(0.45, QColor(12, 23, 36))
+    base.setColorAt(0.72, QColor(8, 22, 33))
+    base.setColorAt(1.0, QColor(6, 11, 18))
+    painter.fillRect(rect, base)
+
+    painter.save()
+    painter.setClipRect(rect)
+
+    shards = (
+        (-0.30, 0.30, 8, QColor(120, 205, 255, 14)),
+        (0.08, 0.20, 10, QColor(255, 255, 255, 9)),
+        (0.46, 0.34, 6, QColor(90, 220, 215, 12)),
+        (0.74, 0.26, 8, QColor(140, 170, 255, 11)),
+    )
+    for start, width, alpha, color in shards:
+        x = rect.left() + rect.width() * start
+        band_width = max(24.0, rect.width() * width)
+        skew = rect.height() * 0.42
+        polygon = QPolygonF(
+            [
+                QPointF(x, rect.top()),
+                QPointF(x + band_width, rect.top()),
+                QPointF(x + band_width - skew, rect.bottom()),
+                QPointF(x - skew, rect.bottom()),
+            ]
+        )
+        gradient = QLinearGradient(
+            QPointF(x, rect.top()), QPointF(x + band_width, rect.bottom())
+        )
+        gradient.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), 0))
+        gradient.setColorAt(0.35, QColor(color.red(), color.green(), color.blue(), alpha))
+        gradient.setColorAt(0.70, QColor(color.red(), color.green(), color.blue(), alpha // 2))
+        gradient.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(gradient)
+        painter.drawPolygon(polygon)
+
+    blobs = (
+        (0.10, -0.04, 0.72, QColor(38, 128, 235, int(96 * shade))),
+        (0.94, 0.14, 0.60, QColor(32, 200, 188, int(62 * shade))),
+        (0.72, 0.96, 0.72, QColor(86, 104, 246, int(78 * shade))),
+        (0.00, 0.88, 0.56, QColor(18, 112, 214, int(62 * shade))),
+        (0.44, 0.40, 0.42, QColor(20, 46, 78, int(70 * shade))),
+    )
+    for cx, cy, radius_ratio, color in blobs:
+        center = QPointF(
+            rect.left() + rect.width() * cx, rect.top() + rect.height() * cy
+        )
+        radius = max(rect.width(), rect.height()) * radius_ratio
+        gradient = QRadialGradient(center, radius)
+        gradient.setColorAt(0.0, color)
+        gradient.setColorAt(
+            0.48,
+            QColor(color.red(), color.green(), color.blue(), color.alpha() // 2),
+        )
+        gradient.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
+        painter.setBrush(gradient)
+        painter.drawEllipse(center, radius, radius)
+
+    sheen = QLinearGradient(
+        QPointF(rect.left(), rect.top()),
+        QPointF(rect.left(), rect.top() + rect.height() * 0.55),
+    )
+    sheen.setColorAt(0.0, QColor(255, 255, 255, 13))
+    sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+    painter.fillRect(rect, sheen)
+
+    vignette = QRadialGradient(rect.center(), max(rect.width(), rect.height()) * 0.78)
+    vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
+    vignette.setColorAt(0.62, QColor(0, 0, 0, 0))
+    vignette.setColorAt(1.0, QColor(0, 0, 0, 96))
+    painter.fillRect(rect, vignette)
+
+    painter.restore()
+    painter.restore()
+
+
+def backdrop_pixmap(size, ratio: float = 1.0) -> QPixmap:
+    """Render the backdrop once per window size for cheap repaints."""
+    width = max(1, int(size.width() * ratio))
+    height = max(1, int(size.height() * ratio))
+    pixmap = QPixmap(width, height)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    paint_backdrop(painter, QRectF(0, 0, width, height))
+    painter.end()
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+# --------------------------------------------------------------------------- #
+# widgets
+# --------------------------------------------------------------------------- #
 class Dot(QWidget):
-    """A 10px status light."""
+    """A small status light with a soft halo."""
 
     def __init__(self, color: str = MUTED, parent=None):
         super().__init__(parent)
@@ -212,9 +532,13 @@ class Dot(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        halo = QColor(self._color)
+        halo.setAlpha(70)
         painter.setPen(Qt.NoPen)
+        painter.setBrush(halo)
+        painter.drawEllipse(QRectF(0, 0, 12, 12))
         painter.setBrush(self._color)
-        painter.drawEllipse(QRectF(1, 1, 10, 10))
+        painter.drawEllipse(QRectF(3, 3, 6, 6))
 
 
 class Card(QFrame):
@@ -255,13 +579,22 @@ class Preview(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 12, 12)
+        path.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 16, 16)
         painter.setClipPath(path)
-        painter.fillRect(self.rect(), QColor("#080b0f"))
 
         if self._image is None:
+            field = QLinearGradient(
+                QPointF(0, 0), QPointF(self.width(), self.height())
+            )
+            field.setColorAt(0.0, QColor(16, 27, 41))
+            field.setColorAt(1.0, QColor(9, 16, 25))
+            painter.fillRect(self.rect(), field)
             painter.setPen(QColor(MUTED))
             painter.drawText(self.rect(), Qt.AlignCenter, "Camera off")
+            painter.setClipping(False)
+            painter.setPen(QPen(QColor(255, 255, 255, 22), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
             return
 
         target = self.rect()
@@ -283,7 +616,7 @@ class Preview(QWidget):
                 (x2 - x1) * scale,
                 (y2 - y1) * scale,
             )
-            painter.drawRoundedRect(rect, 10, 10)
+            painter.drawRoundedRect(rect, 12, 12)
 
         if self._label:
             painter.setPen(QColor(ACCENT))
@@ -299,8 +632,16 @@ class Preview(QWidget):
             font.setPointSize(10)
             font.setBold(False)
             painter.setFont(font)
-            painter.drawText(self.rect().adjusted(0, 0, -16, -12),
-                             Qt.AlignRight | Qt.AlignBottom, self._hint)
+            painter.drawText(
+                self.rect().adjusted(0, 0, -16, -12),
+                Qt.AlignRight | Qt.AlignBottom,
+                self._hint,
+            )
+
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(255, 255, 255, 24), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
 
 
 _APP_ICON: QIcon | None = None

@@ -43,11 +43,11 @@ class ModelsDialog(QDialog):
         self._worker: _DownloadWorker | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 24, 26, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 24, 28, 22)
+        layout.setSpacing(14)
 
         heading = QLabel("Download face models")
-        heading.setObjectName("h1")
+        heading.setObjectName("big")
         layout.addWidget(heading)
 
         body = QLabel(
@@ -55,6 +55,7 @@ class ModelsDialog(QDialog):
             "bundled with the installer, so Glance downloads them once from InsightFace's "
             "official release and checks the SHA-256 before use."
         )
+        body.setObjectName("body")
         body.setWordWrap(True)
         layout.addWidget(body)
 
@@ -78,6 +79,7 @@ class ModelsDialog(QDialog):
         self.status = QLabel("")
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
+        self.status.setVisible(False)
         layout.addWidget(self.status)
 
         self.progress = QProgressBar()
@@ -106,6 +108,7 @@ class ModelsDialog(QDialog):
         self.terms_button.setEnabled(False)
         self.progress.setValue(0)
         self.progress.setVisible(True)
+        self.status.setVisible(True)
         self.status.setText("Connecting to GitHub…")
 
         worker = _DownloadWorker(self)

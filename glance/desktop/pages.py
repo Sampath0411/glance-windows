@@ -7,8 +7,6 @@ import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
@@ -21,7 +19,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QStackedWidget,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -30,8 +27,17 @@ from ..core import IdentityStore
 
 from . import backend
 from .models_setup import ModelsDialog
+from .navigation import navigation_icon
 from .theme import ACCENT, DANGER, MUTED, WARN, Card, Dot, Preview
-from .settings_widgets import SettingsDivider, SettingsGroup, SettingsRow
+from .settings_widgets import (
+    CheckBox,
+    NumberField,
+    SegmentedTiles,
+    Select,
+    SettingsDivider,
+    SettingsGroup,
+    SettingsRow,
+)
 
 
 def _title(text: str, size: str = "h1") -> QLabel:
@@ -45,6 +51,32 @@ def _muted(text: str) -> QLabel:
     label.setObjectName("muted")
     label.setWordWrap(True)
     return label
+
+
+def _page_header(title: str, subtitle: str, icon_index: int) -> QWidget:
+    """Icon, page title and one-line description, like the reference layout."""
+    host = QWidget()
+    grid = QGridLayout(host)
+    grid.setContentsMargins(0, 0, 0, 2)
+    grid.setHorizontalSpacing(11)
+    grid.setVerticalSpacing(1)
+
+    glyph = QLabel()
+    bitmap = navigation_icon(icon_index, "#e9eff8").pixmap(40, 40)
+    bitmap.setDevicePixelRatio(2)
+    glyph.setPixmap(bitmap)
+    glyph.setFixedSize(20, 20)
+    grid.addWidget(glyph, 0, 0, 2, 1, Qt.AlignTop)
+
+    heading = _title(title)
+    heading.setObjectName("h1")
+    grid.addWidget(heading, 0, 1)
+    caption = QLabel(subtitle)
+    caption.setObjectName("pageSub")
+    caption.setWordWrap(True)
+    grid.addWidget(caption, 1, 1)
+    grid.setColumnStretch(1, 1)
+    return host
 
 
 def _scrollable(inner: QWidget) -> QScrollArea:
@@ -103,17 +135,19 @@ class Dashboard(QWidget):
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(18)
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(16)
 
         header = QHBoxLayout()
-        header.addWidget(_title("A simpler sign-in."))
-        header.addStretch(1)
+        header.setContentsMargins(0, 0, 118, 0)
+        header.addWidget(
+            _page_header("General", "Face unlock for this Windows account.", 0), 1
+        )
+        header.addStretch(0)
         self.lock_button = QPushButton("Lock now")
         self.lock_button.clicked.connect(backend.lock_workstation)
-        header.addWidget(self.lock_button)
+        header.addWidget(self.lock_button, 0, Qt.AlignTop)
         layout.addLayout(header)
-        layout.addWidget(_muted("Manage face unlock for this Windows account."))
 
         # status
         status = Card()
@@ -137,13 +171,11 @@ class Dashboard(QWidget):
         status_layout.addWidget(self.pause_button, 0, Qt.AlignTop)
         layout.addWidget(status)
 
-        self.autostart = QCheckBox("Run protection when I sign in")
+        self.autostart = CheckBox("Run protection when I sign in")
         self.autostart.toggled.connect(self._set_autostart)
         self._autostart_task: Task | None = None
 
-        # three facts
-        grid = QVBoxLayout()
-        grid.setSpacing(8)
+        # setup facts
         layout.addWidget(_title("Your setup", "h2"))
 
         self.identity_card = self._fact("Identity", "—", "")
@@ -152,10 +184,11 @@ class Dashboard(QWidget):
         set_password = QPushButton("Set password…")
         set_password.clicked.connect(self._set_password)
         self.credential_card[3].addWidget(set_password)
-        grid.addWidget(self.identity_card[0])
-        grid.addWidget(self.credential_card[0])
-        grid.addWidget(self.unlock_card[0])
-        layout.addLayout(grid)
+        setup = SettingsGroup()
+        setup.add_row(self.identity_card[0])
+        setup.add_row(self.credential_card[0])
+        setup.add_row(self.unlock_card[0])
+        layout.addWidget(setup)
         layout.addWidget(_title("Preferences", "h2"))
         preferences = SettingsGroup()
         preferences.add_row(SettingsRow("Start when I sign in", "Run protection automatically after Windows sign-in.", self.autostart))
@@ -172,7 +205,7 @@ class Dashboard(QWidget):
         camera_header = QHBoxLayout()
         camera_header.addWidget(_title("Camera", "h2"))
         camera_header.addStretch(1)
-        self.camera_toggle = QCheckBox("Live preview")
+        self.camera_toggle = CheckBox("Live preview")
         self.camera_toggle.setChecked(False)
         self.camera_toggle.toggled.connect(self._toggle_camera)
         camera_header.addWidget(self.camera_toggle)
@@ -195,19 +228,12 @@ class Dashboard(QWidget):
         self._pause_task: Task | None = None
 
     def _fact(self, title: str, value: str, detail: str):
-        card = Card()
-        column = QHBoxLayout(card)
-        column.setContentsMargins(20, 12, 20, 12)
-        column.setSpacing(16)
-        labels = QVBoxLayout()
-        labels.setSpacing(3)
-        labels.addWidget(_title(title, "rowTitle"))
-        value_label = _title(value, "rowTitle")
-        detail_label = _muted(detail)
-        labels.addWidget(detail_label)
-        column.addLayout(labels, 1)
-        column.addWidget(value_label)
-        return card, value_label, detail_label, column
+        row = SettingsRow(title, detail)
+        row.subtitle.setVisible(True)
+        value_label = QLabel(value)
+        value_label.setObjectName("rowTitle")
+        row.trailing_layout.insertWidget(0, value_label)
+        return row, value_label, row.subtitle, row.trailing_layout
 
     # -- lifecycle --------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: N802
@@ -363,15 +389,21 @@ class EnrollPage(QWidget):
         self._camera_ready = False
         self._capture_pending = False
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(20)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(18)
+        layout.addWidget(_page_header(
+            "Your Face",
+            "Look at the camera in even light and capture eight or more samples, "
+            "turning your head slightly between them.",
+            1,
+        ))
+
+        body = QHBoxLayout()
+        body.setSpacing(20)
 
         left = QVBoxLayout()
         left.setSpacing(12)
-        left.addWidget(_title("Your face."))
-        left.addWidget(_muted("Look at the camera in even light and capture eight or more "
-                              "samples, turning your head slightly between them."))
         self.preview = Preview()
         self.preview.setMinimumWidth(280)
         left.addWidget(self.preview, 1)
@@ -395,7 +427,7 @@ class EnrollPage(QWidget):
         row.addWidget(self.counter)
         row.addStretch(1)
         left.addLayout(row)
-        layout.addLayout(left, 3)
+        body.addLayout(left, 3)
 
         right = QVBoxLayout()
         right.setSpacing(12)
@@ -436,7 +468,8 @@ class EnrollPage(QWidget):
         people_layout.addStretch(1)
         right.addWidget(people, 1)
 
-        layout.addLayout(right, 2)
+        body.addLayout(right, 2)
+        layout.addLayout(body, 1)
 
     # -- lifecycle --------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: N802
@@ -607,28 +640,42 @@ class EnrollPage(QWidget):
 # recognition
 # --------------------------------------------------------------------------- #
 class SettingsPage(QWidget):
+    PRESETS = {"loose": 50, "balanced": 60, "strict": 72}
+
     def __init__(self, window):
         super().__init__()
         self.window = window
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(20)
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(16)
 
-        layout.addWidget(_title("Recognition, your way."))
-        layout.addWidget(_muted("Fine-tune how Glance recognizes your selected face."))
+        layout.addWidget(_page_header(
+            "Recognition",
+            "Decide how confidently Glance must recognize you.",
+            4,
+        ))
 
         card = Card()
         form = QVBoxLayout(card)
-        form.setContentsMargins(14, 12, 14, 12)
+        form.setContentsMargins(18, 14, 18, 16)
         form.setSpacing(10)
 
         form.addWidget(_title("Who may unlock", "h2"))
-        self.identity = QComboBox()
+        self.identity = Select()
         self.identity.currentIndexChanged.connect(self._selection_changed)
         form.addWidget(self.identity)
         form.addWidget(_muted("Only the selected person can unlock this account. Choose an enrolled face to enable recognition."))
+
+        form.addWidget(_title("Matching profile", "h2"))
+        self.presets = SegmentedTiles((
+            ("loose", "Loose", "0.50 · unlocks easily"),
+            ("balanced", "Balanced", "0.60 · recommended"),
+            ("strict", "Strict", "0.72 · fewer false accepts"),
+        ))
+        self.presets.valueChanged.connect(self._preset_chosen)
+        form.addWidget(self.presets)
 
         form.addWidget(_title("Match threshold", "h2"))
         threshold_row = QHBoxLayout()
@@ -646,10 +693,11 @@ class SettingsPage(QWidget):
 
         form.addWidget(_title("Give up after", "h2"))
         timeout_row = QHBoxLayout()
-        self.timeout = QSpinBox()
+        self.timeout = NumberField()
         self.timeout.setRange(15, 600)
         self.timeout.setSingleStep(15)
         self.timeout.setSuffix(" s")
+        self.timeout.setFixedWidth(140)
         timeout_row.addWidget(self.timeout)
         timeout_row.addStretch(1)
         form.addLayout(timeout_row)
@@ -700,6 +748,13 @@ class SettingsPage(QWidget):
             valid = isinstance(selected, str) and bool(selected)
             self.save.setEnabled(valid and self._settings_task is None)
 
+    def _preset_chosen(self, key: str) -> None:
+        value = self.PRESETS.get(key)
+        if value is not None and value != self.threshold.value():
+            self.threshold.setValue(value)
+        else:
+            self._threshold_changed(self.threshold.value())
+
     def _threshold_changed(self, value: int) -> None:
         score = value / 100
         self.threshold_value.setText(f"{score:.2f}")
@@ -710,6 +765,9 @@ class SettingsPage(QWidget):
         else:
             tone = "Strict - fewer false accepts, more retries in poor light."
         self.threshold_note.setText(tone)
+        if hasattr(self, "presets"):
+            match = next((name for name, preset in self.PRESETS.items() if preset == value), None)
+            self.presets.set_value(match)
 
     def _save(self) -> None:
         selected = self.identity.currentData()
@@ -773,12 +831,12 @@ class LogsPage(QWidget):
         header = QHBoxLayout()
         header.addWidget(_title("Logs"))
         header.addStretch(1)
-        self.source = QComboBox()
+        self.source = Select()
         self.source.addItem("agent.log", "agent.log")
         self.source.addItem("provider.log", "provider.log")
         self.source.currentIndexChanged.connect(self.refresh)
         header.addWidget(self.source)
-        self.auto = QCheckBox("Auto refresh")
+        self.auto = CheckBox("Auto refresh")
         self.auto.setChecked(True)
         header.addWidget(self.auto)
         refresh = QPushButton("Refresh")
@@ -825,10 +883,13 @@ class PasswordPage(QWidget):
         super().__init__()
         self.window = window
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(12)
-        layout.addWidget(_title("Your Windows sign-in."))
-        layout.addWidget(_muted("Connect Glance to your existing Windows account."))
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(14)
+        layout.addWidget(_page_header(
+            "Password",
+            "Connect Glance to your existing Windows account.",
+            2,
+        ))
 
         self.group = SettingsGroup()
         self.credential = QLabel("Checking…")
@@ -949,20 +1010,24 @@ class CameraPage(QWidget):
         super().__init__()
         self.window = window
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(12)
-        layout.addWidget(_title("Find your best angle."))
-        layout.addWidget(_muted("Check your camera before your next sign-in."))
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(14)
+        layout.addWidget(_page_header(
+            "Camera",
+            "Check your camera before your next sign-in.",
+            3,
+        ))
         self.group = SettingsGroup()
-        self.camera_index = QSpinBox()
+        self.camera_index = NumberField()
         self.camera_index.setRange(0, 5)
+        self.camera_index.setFixedWidth(110)
         self.camera_index.setValue(window.settings.camera)
         self.group.add_row(SettingsRow("Camera device", "Change this if another camera is preferred.", self.camera_index))
         self.save_button = QPushButton("Save camera")
         self.save_button.clicked.connect(self._save_camera)
         self.group.add_row(SettingsRow("Default camera", trailing=self.save_button))
         layout.addWidget(self.group)
-        self.preview_toggle = QCheckBox("Show live preview")
+        self.preview_toggle = CheckBox("Show live preview")
         self.preview_toggle.setChecked(False)
         self.preview_toggle.toggled.connect(self._toggle_preview)
         layout.addWidget(self.preview_toggle)
@@ -1017,14 +1082,17 @@ class AboutPage(QWidget):
     def __init__(self, window):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(34, 28, 34, 28)
         layout.setSpacing(12)
         self.content = QWidget()
         content = QVBoxLayout(self.content)
         content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(20)
-        content.addWidget(_title("Small app. Familiar welcome."))
-        content.addWidget(_muted("Glance for Windows"))
+        content.setSpacing(16)
+        content.addWidget(_page_header(
+            "About",
+            "Version, models, and diagnostics for this install.",
+            5,
+        ))
         info = SettingsGroup()
         info.add_row(SettingsRow("Glance", "Face unlock, on your own device.\nVersion 0.1.0 · Windows 11"))
         content.addWidget(info)
@@ -1112,7 +1180,7 @@ class PasswordDialog(QDialog):
         self.password.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.password)
 
-        reveal = QCheckBox("Show password")
+        reveal = CheckBox("Show password")
         reveal.toggled.connect(
             lambda on: self.password.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password)
         )

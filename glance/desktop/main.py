@@ -6,8 +6,8 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -31,21 +31,34 @@ from .pages import (
     PasswordPage, RecognitionPage,
 )
 from .settings_widgets import FloatingTabBar
-from .navigation import Sidebar, style_native_window
-from .theme import ACCENT, MUTED, Dot, app_icon, resolve_theme, windows_appearance
+from .navigation import Sidebar, WindowControls, style_native_window
+from .theme import (
+    ACCENT,
+    app_icon,
+    backdrop_pixmap,
+    resolve_theme,
+    windows_appearance,
+)
 
 APP_MUTEX = "Local\\GlanceDesktop"
 
 
 class MainWindow(QMainWindow):
+    MARGIN = 18
+    RADIUS = 20
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Glance")
         self.setWindowIcon(app_icon())
-        self._compact_size = (1040, 760)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._compact_size = (1060, 780)
         self._enrollment_size = self._compact_size
         self.resize(*self._compact_size)
-        self.setMinimumSize(960, 700)
+        self.setMinimumSize(980, 720)
+        self._backdrop_cache = None
+        self._backdrop_key = None
 
         self.settings = backend.Settings.load()
         self._owners: set[str] = set()
@@ -59,9 +72,12 @@ class MainWindow(QMainWindow):
         self.camera.failed.connect(self._camera_failed)
 
         central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        central.setObjectName("windowRoot")
+        self._root_layout = QHBoxLayout(central)
+        self._root_layout.setContentsMargins(
+            self.MARGIN, self.MARGIN, self.MARGIN, self.MARGIN
+        )
+        self._root_layout.setSpacing(0)
 
         self.stack = QStackedWidget()
         self.dashboard = Dashboard(self)
@@ -76,21 +92,31 @@ class MainWindow(QMainWindow):
             self.camera_page, self.settings_page, self.about_page,
         )
         for page in self.pages:
-            if page in (self.password_page, self.camera_page, self.about_page):
-                page.layout().setContentsMargins(32, 28, 32, 28)
-                page.layout().setSpacing(20)
             self.stack.addWidget(page)
         self.nav = Sidebar(
-            ("Overview", "Your face", "Windows sign-in", "Camera", "Recognition", "About"), self
+            (
+                ("", ("General",)),
+                ("Authentication", ("Your Face", "Password", "Camera", "Recognition")),
+                ("Glance", ("About",)),
+            ),
+            self,
         )
         self.nav.indexChanged.connect(self._navigate)
-        layout.addWidget(self.nav)
-        layout.addWidget(self.stack, 1)
+        self._root_layout.addWidget(self.nav)
+        self._root_layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
-        style_native_window(self)
 
-        self.chip_dot = Dot(MUTED)
-        self.chip_label = QLabel("checking…")
+        self.window_controls = WindowControls(central)
+        self.window_controls.closeRequested.connect(self.close)
+        self.window_controls.minimizeRequested.connect(self.showMinimized)
+        self.window_controls.zoomRequested.connect(self._toggle_zoom)
+        self.window_controls.raise_()
+
+        style_native_window(self)
+        self._apply_frame_mode()
+
+        self.chip_dot = self.nav.status_dot
+        self.chip_label = self.nav.status_label
         self.camera.ready.connect(self.enroll.on_camera_ready)
         self.camera.preview.connect(self.dashboard.on_preview)
         self.camera.preview.connect(self.enroll.on_preview)
@@ -103,6 +129,154 @@ class MainWindow(QMainWindow):
         self._chip_timer.timeout.connect(self._refresh_chip)
         self._chip_timer.start()
         self._refresh_chip()
+
+    # -- window chrome ----------------------------------------------------
+    def _card_rect(self) -> QRect:
+        if self.isMaximized() or self.isFullScreen():
+            return self.rect()
+        return self.rect().adjusted(
+            self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN
+        )
+
+    def _apply_frame_mode(self) -> None:
+        framed = not (self.isMaximized() or self.isFullScreen())
+        margin = self.MARGIN if framed else 0
+        self._root_layout.setContentsMargins(margin, margin, margin, margin)
+        self.nav.setProperty("framed", framed)
+        self.nav.style().unpolish(self.nav)
+        self.nav.style().polish(self.nav)
+        self.window_controls.set_maximised(not framed)
+        self._place_controls()
+        self._backdrop_key = None
+        self.update()
+
+    def _place_controls(self) -> None:
+        controls = getattr(self, "window_controls", None)
+        if controls is None:
+            return
+        framed = not (self.isMaximized() or self.isFullScreen())
+        margin = self.MARGIN if framed else 0
+        x = self.width() - margin - (12 if framed else 8) - controls.width()
+        y = margin + (6 if framed else 2)
+        controls.move(max(0, x), max(0, y))
+
+    def _toggle_zoom(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and hasattr(self, "window_controls"):
+            self._apply_frame_mode()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._place_controls()
+        self._backdrop_key = None
+
+    def _backdrop(self, size):
+        ratio = round(self.devicePixelRatioF(), 2) or 1.0
+        key = (int(size.width()), int(size.height()), ratio)
+        if self._backdrop_key != key or self._backdrop_cache is None:
+            self._backdrop_cache = backdrop_pixmap(size, ratio)
+            self._backdrop_key = key
+        return self._backdrop_cache
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        framed = not (self.isMaximized() or self.isFullScreen())
+        if framed:
+            rect = QRectF(self.rect()).adjusted(
+                self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN
+            )
+            radius = float(self.RADIUS)
+            self._paint_shadow(painter, rect, radius)
+        else:
+            rect = QRectF(self.rect())
+            radius = 0.0
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.save()
+        painter.setClipPath(path)
+        painter.drawPixmap(rect.topLeft(), self._backdrop(rect.size()))
+        painter.restore()
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+
+    def _paint_shadow(self, painter: QPainter, rect: QRectF, radius: float) -> None:
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 5))
+        for step in range(14, 0, -1):
+            painter.drawRoundedRect(
+                rect.adjusted(-step, -step + 2, step, step + 4),
+                radius + step,
+                radius + step,
+            )
+        painter.restore()
+
+    def _edges_at(self, pos) -> Qt.Edge:
+        if self.isMaximized() or self.isFullScreen():
+            return Qt.Edge(0)
+        card = self._card_rect()
+        near = 8
+        edges = Qt.Edge(0)
+        if card.left() - near <= pos.x() <= card.left() + near:
+            edges |= Qt.LeftEdge
+        elif card.right() - near <= pos.x() <= card.right() + near:
+            edges |= Qt.RightEdge
+        if card.top() - near <= pos.y() <= card.top() + near:
+            edges |= Qt.TopEdge
+        elif card.bottom() - near <= pos.y() <= card.bottom() + near:
+            edges |= Qt.BottomEdge
+        return edges
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            handle = self.windowHandle()
+            edges = self._edges_at(event.position().toPoint())
+            if handle is not None and edges:
+                handle.startSystemResize(edges)
+                return
+            top = self._card_rect().top()
+            if handle is not None and event.position().y() <= top + 46:
+                handle.startSystemMove()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        edges = self._edges_at(event.position().toPoint())
+        if edges & Qt.LeftEdge and edges & Qt.TopEdge:
+            cursor = Qt.SizeFDiagCursor
+        elif edges & Qt.RightEdge and edges & Qt.BottomEdge:
+            cursor = Qt.SizeFDiagCursor
+        elif edges & Qt.RightEdge and edges & Qt.TopEdge:
+            cursor = Qt.SizeBDiagCursor
+        elif edges & Qt.LeftEdge and edges & Qt.BottomEdge:
+            cursor = Qt.SizeBDiagCursor
+        elif edges & (Qt.LeftEdge | Qt.RightEdge):
+            cursor = Qt.SizeHorCursor
+        elif edges & (Qt.TopEdge | Qt.BottomEdge):
+            cursor = Qt.SizeVerCursor
+        else:
+            cursor = Qt.ArrowCursor
+        self.setCursor(cursor)
+        super().mouseMoveEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.button() == Qt.LeftButton
+            and event.position().y() <= self._card_rect().top() + 46
+        ):
+            self._toggle_zoom()
+            return
+        super().mouseDoubleClickEvent(event)
 
     # -- camera sharing ---------------------------------------------------
     def acquire_camera(self, owner: str) -> None:
@@ -141,6 +315,7 @@ class MainWindow(QMainWindow):
     def _navigate(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         self.nav.set_current_index(index)
+        self.window_controls.raise_()
 
     def show_first_run_if_needed(self) -> None:
         if not FirstRunDialog.is_completed():
@@ -193,8 +368,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_chip(self) -> None:
         running = backend.agent_running()
-        self.chip_dot.set_color(ACCENT if running else "#e3b341")
-        self.chip_label.setText("protected" if running else "paused")
+        self.nav.set_status(
+            "Protected" if running else "Paused",
+            ACCENT if running else "#e3b341",
+        )
         if self._tray is not None:
             self._tray.setToolTip("Glance · protected" if running else "Glance · paused")
 

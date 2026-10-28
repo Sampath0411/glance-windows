@@ -17,7 +17,7 @@ from unittest.mock import patch
 import numpy as np
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 import glance.agent.glance_agent as glance_agent
 import glance.desktop.backend as backend
@@ -198,7 +198,7 @@ class AdaptiveThemeTests(unittest.TestCase):
         window = MainWindow()
         self.assertEqual(
             [button.text() for button in window.nav.buttons],
-            ["Overview", "Your face", "Windows sign-in", "Camera", "Recognition", "About"],
+            ["General", "Your Face", "Password", "Camera", "Recognition", "About"],
         )
         self.assertEqual(window.stack.count(), 6)
         self.assertFalse(window.camera.isRunning())
@@ -210,6 +210,30 @@ class AdaptiveThemeTests(unittest.TestCase):
         self.assertEqual(window.size(), original_size)
         self.assertTrue(window.nav.buttons[4].isChecked())
         self.assertFalse(window.nav.buttons[0].isChecked())
+        window.close()
+
+    def test_sidebar_groups_and_window_controls_match_the_glass_shell(self) -> None:
+        window = MainWindow()
+        sections = [
+            label.text()
+            for label in window.nav.findChildren(QLabel)
+            if label.objectName() == "navSection"
+        ]
+        self.assertEqual(sections, ["Authentication", "Glance"])
+        self.assertEqual(window.nav.count(), 6)
+        self.assertTrue(hasattr(window, "window_controls"))
+        self.assertTrue(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        window.close()
+
+    def test_matching_profile_tiles_drive_the_threshold(self) -> None:
+        window = MainWindow()
+        page = window.settings_page
+        page.presets.tiles["strict"].click()
+        self.assertEqual(page.threshold.value(), 72)
+        self.assertTrue(page.presets.tiles["strict"].isChecked())
+        page.threshold.setValue(63)
+        self.assertIsNone(page.presets.value())
+        self.assertEqual(page.threshold_value.text(), "0.63")
         window.close()
 
     def test_compact_onboarding_module_is_available(self) -> None:
