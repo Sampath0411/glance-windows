@@ -22,6 +22,22 @@ person to unlock Windows, change the saved password, and enroll new faces.
 - Missing models, camera failure, or a read error blocks the page with a clear
   message; the gate never falls open.
 
+## First-run order
+
+On a new installation the order is fixed:
+
+1. **Password** comes first. With no face enrolled, the page opens without a
+   face check and the user verifies and stores their Windows password.
+2. **Your Face** stays blocked until that credential exists. Opening it earlier
+   shows a message directing the user to Password and does not start the
+   camera or enrollment.
+3. Once a face is enrolled, every visit to Password and Your Face is gated by
+   the face check described above.
+
+Removing or resetting the stored credential blocks new enrollment again until
+the password is set. Existing enrolled faces still gate the pages. The first-run
+guide presents Password before Your Face to match this order.
+
 ### Animation sources
 
 - Success: `C:\Users\sampa\glance\glance\Resources\unlockanimation.mp4`
