@@ -84,7 +84,9 @@ assert ga.grant_mod is glance.agent.grant
                 local_app_data=appdata,
             )
             paths.data_dir.mkdir(parents=True)
-            paths.config_path.write_text('{"identity":"New"}', encoding="utf-8")
+            paths.config_path.write_text(
+                '{"identity":"New","any_identity":false}', encoding="utf-8"
+            )
             seen = []
 
             class Watcher:

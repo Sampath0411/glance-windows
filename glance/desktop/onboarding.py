@@ -40,10 +40,10 @@ class FirstRunDialog(QDialog):
         root.addWidget(self.progress)
 
         self.stack = QStackedWidget()
-        self._add_step("Face Unlock for Windows", "Set up face recognition and choose which Windows account Glance may unlock.")
-        self._add_step("Camera access", "Allow desktop apps to access your camera in Windows Settings. Glance only opens the camera for enrollment or when you explicitly turn on preview.", "Open camera privacy settings", self._open_camera_privacy)
-        self._add_step("Enroll your face", "Capture several samples in the Face tab. Enrollment is stored locally. Windows currently authorizes one selected identity at a time.", "Open Face", lambda: self._open_page(1))
-        self._add_step("Windows account password", "Windows requires a valid account password after a face match. Set or change it in the Password tab; it is verified and stored encrypted for this PC.", "Open Password", lambda: self._open_page(2))
+        self._add_step("Face Unlock for Windows", "Set up face recognition and choose whether any enrolled person, or one person, may unlock this Windows account.")
+        self._add_step("Camera access", "Allow desktop apps to access your camera in Windows Settings. Glance only opens the camera for enrollment, a face check, or when you explicitly turn on preview.", "Open camera privacy settings", self._open_camera_privacy)
+        self._add_step("Windows account password", "Set this up first. Windows requires a valid account password after a face match; it is verified by Windows and stored encrypted for this PC.", "Open Password", lambda: self._open_page(2))
+        self._add_step("Enroll your face", "Capture several samples in the Face tab. Enrollment is stored locally. You can allow any enrolled face to unlock, or choose one person in Recognition.", "Open Face", lambda: self._open_page(1))
         self._add_step("Security note", "This is a convenience prototype using a standard webcam, not Windows Hello or Apple Face ID. The normal Windows password/PIN sign-in remains available.")
         root.addWidget(self.stack, 1)
 

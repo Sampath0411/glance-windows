@@ -160,6 +160,24 @@ class RuntimePathTests(unittest.TestCase):
 
 
 class BuildManifestTests(unittest.TestCase):
+    def test_standalone_agent_package_contains_idle_lock_module(self) -> None:
+        build = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+        agent_args = build.split("$agentArgs = @(", 1)[1].split(")", 1)[0]
+        self.assertIn("'--include-package=glance'", agent_args)
+        self.assertTrue((ROOT / "glance" / "agent" / "idle_lock.py").is_file())
+
+    def test_original_capture_animations_are_included_in_the_app_package(self) -> None:
+        assets = ROOT / "assets" / "animations"
+        for filename in (
+            "unlockanimation.mp4",
+            "unsuccessfulunlockanimation.mp4",
+            "unlockstatic.png",
+        ):
+            self.assertTrue((assets / filename).is_file(), f"missing capture asset: {filename}")
+        script = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("assets\\animations", script)
+        self.assertIn("=assets/animations", script)
+
     def test_runtime_and_build_dependencies_are_exactly_pinned(self) -> None:
         for filename in ("requirements.txt", "requirements-build.txt"):
             path = ROOT / filename
@@ -216,6 +234,10 @@ class BuildManifestTests(unittest.TestCase):
         self.assertIn("/DAppVersion=$appVersion", script)
         self.assertIn("--product-version=$appVersion", script)
 
+    def test_installer_can_be_written_next_to_a_custom_output_directory(self) -> None:
+        script = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("Join-Path $packageRoot 'GlanceSetup.exe'", script)
+
 
 class AppIconTests(unittest.TestCase):
     def test_approved_artwork_is_checked_in_unchanged(self) -> None:
@@ -266,6 +288,14 @@ class AppIconTests(unittest.TestCase):
         )
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("assets/GlanceDownload.png", readme)
+
+    def test_readme_explains_the_windows_hello_password_fallback_setting(self) -> None:
+        image = ROOT / "assets" / "windows-hello-only-setting.png"
+        self.assertTrue(image.is_file(), "Windows sign-in screenshot is missing")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("assets/windows-hello-only-setting.png", readme)
+        self.assertIn("turn **Off**", readme)
+        self.assertIn("Windows credential provider", readme)
 
     def test_build_and_installer_use_the_approved_icon(self) -> None:
         build = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")

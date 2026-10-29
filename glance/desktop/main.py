@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from . import backend
 from .camera import CameraWorker
+from .face_gate import FaceGateDialog
 from .models_setup import ModelsDialog
 from .onboarding import FirstRunDialog
 from .pages import (
@@ -62,6 +64,7 @@ class MainWindow(QMainWindow):
         self._backdrop_key = None
 
         self.settings = backend.Settings.load()
+        self._current_index = 0
         self._owners: set[str] = set()
         self._quitting = False
         self._camera_stop_timer = QTimer(self)
@@ -285,7 +288,39 @@ class MainWindow(QMainWindow):
             self._tray.showMessage("Camera problem", message, QSystemTrayIcon.Warning, 6000)
 
     # -- navigation -------------------------------------------------------
+    GATED_PAGES = {1: "Your Face", 2: "Password"}
+
+    def request_face_gate(self, purpose: str) -> bool:
+        """Ask for an enrolled face before a sensitive page opens.
+
+        With no enrolled faces the gate is skipped so first-run setup can work;
+        every later visit is checked against any enrolled person.
+        """
+        if not backend.identity_summary(0):
+            return True
+        return FaceGateDialog(self, purpose).exec() == QDialog.Accepted
+
+    def _windows_password_stored(self) -> bool:
+        try:
+            return bool(backend.credential_status(0).get("present"))
+        except Exception:  # noqa: BLE001 - an unreadable credential fails closed
+            return False
+
     def _navigate(self, index: int) -> None:
+        if index == 1 and not self._windows_password_stored():
+            self.nav.set_current_index(self._current_index)
+            QMessageBox.information(
+                self, "Glance",
+                "Set your Windows password before enrolling a face. Glance replays "
+                "your verified password after Windows matches your face.",
+            )
+            self._navigate(2)
+            return
+        purpose = self.GATED_PAGES.get(index)
+        if purpose is not None and not self.request_face_gate(purpose):
+            self.nav.set_current_index(self._current_index)
+            return
+        self._current_index = index
         self.stack.setCurrentIndex(index)
         self.nav.set_current_index(index)
         self.window_controls.raise_()

@@ -16,7 +16,11 @@ $packageRoot = if ($OutputDirectory) {
 }
 $stage = Join-Path $repo '.build\models\buffalo_s'
 $archive = Join-Path $repo '.build\models\buffalo_s.zip'
-$finalInstaller = Join-Path $repo 'dist\GlanceSetup.exe'
+$finalInstaller = if ($OutputDirectory) {
+    Join-Path $packageRoot 'GlanceSetup.exe'
+} else {
+    Join-Path $repo 'dist\GlanceSetup.exe'
+}
 $appVersion = (Get-Content -Raw (Join-Path $repo 'VERSION')).Trim()
 if ($appVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid VERSION value: $appVersion" }
 
@@ -90,6 +94,7 @@ $args = @(
     '-m', 'nuitka',
     '--standalone',
     '--assume-yes-for-downloads',
+    '--lto=no',
     '--mingw64',
     '--enable-plugin=pyside6',
     '--windows-console-mode=disable',
@@ -105,6 +110,7 @@ $args = @(
     '--include-module=glance.desktop.main',
     '--include-package=glance',
     "--include-data-files=$iconSource=assets/GlanceIcon.png",
+    "--include-data-dir=$(Join-Path $repo 'assets\animations')=assets/animations",
     $entryPoint
 )
 $args += $modelDataArgs
@@ -114,7 +120,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Nuitka standalone build failed.' }
 
 $agentEntry = Join-Path $PSScriptRoot 'launch_agent.py'
 $agentArgs = @(
-    '-m', 'nuitka', '--standalone', '--assume-yes-for-downloads', '--mingw64',
+    '-m', 'nuitka', '--standalone', '--assume-yes-for-downloads', '--lto=no', '--mingw64',
     '--windows-console-mode=disable', '--output-filename=GlanceAgent',
     "--windows-icon-from-ico=$icon",
     "--file-version=$appVersion", "--product-version=$appVersion",

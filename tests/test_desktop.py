@@ -15,18 +15,21 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QWidget
 
 import glance.agent.glance_agent as glance_agent
 import glance.desktop.backend as backend
+import glance.desktop.face_gate as face_gate
+import glance.desktop.main as desktop_main
 import glance.desktop.theme as theme
 from glance.desktop.onboarding import FirstRunDialog
 from glance.desktop.models_setup import ModelsDialog
 from glance.desktop.settings_widgets import FloatingTabBar, SettingsGroup, SettingsRow
 from glance.desktop.backend import Settings
 from glance.desktop.camera import CameraWorker
+from glance.desktop.face_gate import FaceGateDialog
 from glance.desktop.pages import EnrollPage, PasswordDialog, SettingsPage
 from glance.desktop.main import MainWindow
 
@@ -83,6 +86,53 @@ class CameraLifecycleTests(unittest.TestCase):
         worker._ready.set()
         self.assertTrue(worker.request_capture(), "first ready capture request must be accepted")
         self.assertFalse(worker.request_capture(), "a pending capture must not be coalesced")
+
+    def test_gate_mode_emits_the_best_match_without_a_capture_request(self) -> None:
+        class FakeCamera:
+            def read(self):
+                return True, np.zeros((100, 100, 3), dtype=np.uint8)
+
+            def release(self) -> None:
+                pass
+
+        class FakePipeline:
+            def __init__(self, threshold: float) -> None:
+                face = SimpleNamespace(bbox=(10, 10, 70, 70), area=3600)
+                self.detector = SimpleNamespace(detect=lambda frame: [face])
+                self.aligner = SimpleNamespace(align=lambda frame, face: np.zeros((112, 112, 3), np.uint8))
+                self.embedder = SimpleNamespace(embed=lambda aligned: np.ones(8))
+                self.store = SimpleNamespace(
+                    load=lambda: None,
+                    best_match=lambda embedding, threshold: (
+                        SimpleNamespace(name="Sampath"), 0.9, 0.9
+                    ),
+                )
+
+            def open_camera(self, index: int):
+                return FakeCamera()
+
+        worker = CameraWorker(pipeline_factory=FakePipeline)
+        results: queue.Queue = queue.Queue()
+        worker.gate.connect(
+            lambda name, score, hint: results.put((name, score, hint)),
+            Qt.ConnectionType.DirectConnection,
+        )
+        worker.start()
+        try:
+            self.assertTrue(worker._ready.wait(1.0), "camera worker never became ready")
+            worker.set_gate(True)
+            name, score, _hint = results.get(timeout=2.0)
+            self.assertEqual(name, "Sampath")
+            self.assertGreaterEqual(score, 0.9)
+            worker.set_gate(False)
+            while not results.empty():
+                results.get_nowait()
+            with self.assertRaises(queue.Empty):
+                results.get(timeout=0.8)
+        finally:
+            worker.set_gate(False)
+            worker.stop()
+            self.assertTrue(worker.wait(1000), "camera worker did not stop")
 
     def test_worker_signals_ready_and_returns_one_capture_result(self) -> None:
         class FakeCamera:
@@ -313,7 +363,7 @@ class AgentIdentityTests(unittest.TestCase):
             self.open_calls += 1
             return AgentIdentityTests.FakeCamera()
 
-    def _main_identity(self, config_bytes: bytes, cli_identity: str) -> str | None:
+    def _main_verifier(self, config_bytes: bytes, cli_identity: str):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             data = root / "data"
@@ -336,14 +386,17 @@ class AgentIdentityTests(unittest.TestCase):
             ):
                 self.assertEqual(glance_agent.main(), 0)
             self.assertEqual(len(seen), 1)
-            return seen[0].identity
+            return seen[0]
+
+    def _main_identity(self, config_bytes: bytes, cli_identity: str) -> str | None:
+        return self._main_verifier(config_bytes, cli_identity).identity
 
     def test_settings_identity_overrides_stale_task_argument(self) -> None:
-        content = json.dumps({"identity": "Anu"}).encode("utf-8")
+        content = json.dumps({"identity": "Anu", "any_identity": False}).encode("utf-8")
         self.assertEqual(self._main_identity(content, "Sampath"), "Anu")
 
     def test_empty_config_identity_does_not_fall_back_to_task_argument(self) -> None:
-        content = json.dumps({"identity": ""}).encode("utf-8")
+        content = json.dumps({"identity": "", "any_identity": False}).encode("utf-8")
         self.assertIsNone(self._main_identity(content, "Sampath"))
 
     def test_corrupt_existing_config_does_not_fall_back_to_task_argument(self) -> None:
@@ -353,16 +406,17 @@ class AgentIdentityTests(unittest.TestCase):
         self.assertIsNone(self._main_identity(b"[]", "Sampath"))
 
     def test_agent_config_accepts_windows_utf8_bom(self) -> None:
-        content = json.dumps({"identity": "Anu"}).encode("utf-8-sig")
+        content = json.dumps({"identity": "Anu", "any_identity": False}).encode("utf-8-sig")
         self.assertEqual(self._main_identity(content, "Sampath"), "Anu")
 
-    def test_only_selected_face_can_write_a_grant(self) -> None:
+    def _grant_result(self, face_name: str, identity: str | None = None,
+                      any_identity: bool = False, identities=("Sampath", "Anu")):
         import numpy as np
 
+        stop = threading.Event()
+
         class FaceCamera:
-            def __init__(self, stop: threading.Event, stop_after: int) -> None:
-                self.stop = stop
-                self.stop_after = stop_after
+            def __init__(self) -> None:
                 self.reads = 0
 
             def isOpened(self) -> bool:
@@ -370,23 +424,24 @@ class AgentIdentityTests(unittest.TestCase):
 
             def read(self):
                 self.reads += 1
-                if self.reads >= self.stop_after:
-                    self.stop.set()
+                if self.reads >= (1 if face_name == "Sampath" else 4):
+                    stop.set()
                 return True, np.zeros((100, 100, 3), dtype=np.uint8)
 
             def release(self) -> None:
                 pass
 
         class Pipeline:
-            def __init__(self, selected_match: str, stop: threading.Event) -> None:
-                identities = [SimpleNamespace(name="Sampath"), SimpleNamespace(name="Anu")]
-                matched = next(i for i in identities if i.name == selected_match)
+            def __init__(self, *args, **kwargs) -> None:
+                people = [SimpleNamespace(name=name) for name in identities]
+                matched = next((person for person in people if person.name == face_name), None)
                 self.store = SimpleNamespace(
-                    identities=identities,
-                    best_match=lambda embedding, threshold: (matched, 0.9, 0.9),
+                    identities=people,
+                    best_match=lambda embedding, threshold: (
+                        (matched, 0.9, 0.9) if matched is not None else None
+                    ),
                 )
-                self.selected_match = selected_match
-                self.camera = FaceCamera(stop, 1 if selected_match == "Sampath" else 4)
+                self.camera = FaceCamera()
 
             def open_camera(self, index: int = 0):
                 return self.camera
@@ -406,34 +461,58 @@ class AgentIdentityTests(unittest.TestCase):
             def observe(self, readings):
                 return SimpleNamespace(decision=glance_agent.lv.Decision.CONFIRMED)
 
+        def write_grant():
+            stop.set()
+            return "grant"
+
+        with (
+            patch.object(glance_agent, "GlancePipeline", return_value=Pipeline()),
+            patch.object(glance_agent.lv, "LivenessEvaluator", Evaluator),
+            patch.object(glance_agent.lv, "extract_glare", return_value=None),
+            patch.object(glance_agent.lv, "detect_device_rectangle", return_value=None),
+            patch.object(glance_agent.lv, "readings", return_value={}),
+            patch.object(glance_agent.grant_mod, "write_grant", side_effect=write_grant) as writer,
+        ):
+            result = glance_agent.Verifier(
+                identity=identity, any_identity=any_identity,
+                require_stable=1, timeout=2,
+            ).run(stop)
+        return result, writer
+
+    def test_only_selected_face_can_write_a_grant(self) -> None:
         for selected_identity in ("Sampath", "Anu"):
             for face_name in ("Sampath", "Anu"):
                 with self.subTest(selected=selected_identity, face=face_name):
-                    stop = threading.Event()
-                    pipeline = Pipeline(face_name, stop)
-
-                    def write_grant():
-                        stop.set()
-                        return "grant"
-
-                    with (
-                        patch.object(glance_agent, "GlancePipeline", return_value=pipeline),
-                        patch.object(glance_agent.lv, "LivenessEvaluator", Evaluator),
-                        patch.object(glance_agent.lv, "extract_glare", return_value=None),
-                        patch.object(glance_agent.lv, "detect_device_rectangle", return_value=None),
-                        patch.object(glance_agent.lv, "readings", return_value={}),
-                        patch.object(glance_agent.grant_mod, "write_grant", side_effect=write_grant) as grant_writer,
-                    ):
-                        result = glance_agent.Verifier(
-                            identity=selected_identity, require_stable=1, timeout=2
-                        ).run(stop)
-
+                    result, writer = self._grant_result(face_name, identity=selected_identity)
                     if face_name == selected_identity:
                         self.assertEqual(result, "granted")
-                        grant_writer.assert_called_once()
+                        writer.assert_called_once()
                     else:
                         self.assertNotEqual(result, "granted")
-                        grant_writer.assert_not_called()
+                        writer.assert_not_called()
+
+    def test_anyone_mode_grants_for_any_enrolled_face(self) -> None:
+        result, writer = self._grant_result("Anu", identity=None, any_identity=True)
+        self.assertEqual(result, "granted")
+        writer.assert_called_once()
+
+    def test_anyone_mode_fails_closed_with_no_enrolled_faces(self) -> None:
+        result, writer = self._grant_result("Sampath", identity=None,
+                                            any_identity=True, identities=())
+        self.assertEqual(result, "error: no enrolled identities")
+        writer.assert_not_called()
+
+    def test_anyone_config_sets_a_wildcard_verifier(self) -> None:
+        content = json.dumps({"any_identity": True, "identity": ""}).encode("utf-8")
+        verifier = self._main_verifier(content, "Sampath")
+        self.assertTrue(verifier.any_identity)
+        self.assertIsNone(verifier.identity)
+
+    def test_specific_config_keeps_one_identity(self) -> None:
+        content = json.dumps({"any_identity": False, "identity": "Anu"}).encode("utf-8")
+        verifier = self._main_verifier(content, "Sampath")
+        self.assertFalse(verifier.any_identity)
+        self.assertEqual(verifier.identity, "Anu")
 
     def test_no_selection_fails_closed_even_with_one_enrolled_identity(self) -> None:
         pipeline = self.FakePipeline()
@@ -461,8 +540,9 @@ class SettingsIdentityTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
-    def make_page(self, selected: str) -> SettingsPage:
-        window = SimpleNamespace(settings=Settings(identity=selected))
+    def make_page(self, selected: str, any_identity: bool = False) -> SettingsPage:
+        window = SimpleNamespace(settings=Settings(identity=selected,
+                                                   any_identity=any_identity))
         page = SettingsPage(window)
         with (
             patch("glance.desktop.pages.backend.identity_summary", return_value=[
@@ -474,14 +554,67 @@ class SettingsIdentityTests(unittest.TestCase):
             page.load()
         return page
 
-    def test_who_may_unlock_never_offers_any_enrolled(self) -> None:
+    def test_anyone_enrolled_is_the_default_scope(self) -> None:
+        page = self.make_page("", any_identity=True)
+        self.assertEqual(page.identity.currentData(), "")
+        self.assertEqual(page.identity.currentText(), "Anyone enrolled")
+        self.assertTrue(page.save.isEnabled())
+        self.assertIn("Anyone enrolled", page.scope_note.text())
+
+    def test_one_person_scope_is_preserved(self) -> None:
         page = self.make_page("Sampath")
         self.assertEqual(page.identity.currentData(), "Sampath")
-        self.assertEqual(page.identity.findData(""), -1)
+        self.assertIn("Only Sampath", page.scope_note.text())
 
-    def test_save_is_disabled_when_no_person_is_selected(self) -> None:
-        page = self.make_page("")
-        self.assertFalse(page.save.isEnabled())
+    def test_saving_anyone_scope_persists_an_empty_identity(self) -> None:
+        page = self.make_page("Sampath", any_identity=True)
+        seen = {}
+
+        def apply(candidate, _running):
+            seen["candidate"] = candidate
+            return True, "Settings saved."
+
+        class FakeTask:
+            def __init__(self, function, _parent=None):
+                self.function = function
+                self.done = SimpleNamespace(connect=lambda _callback: None)
+
+            def start(self):
+                self.function()
+
+        with (
+            patch("glance.desktop.pages.Task", FakeTask),
+            patch("glance.desktop.pages.backend.agent_running", return_value=False),
+            patch("glance.desktop.pages.backend.apply_settings", side_effect=apply),
+        ):
+            page._save()
+        self.assertTrue(seen["candidate"].any_identity)
+        self.assertEqual(seen["candidate"].identity, "")
+
+    def test_saving_a_person_scope_persists_that_identity(self) -> None:
+        page = self.make_page("Sampath", any_identity=False)
+        seen = {}
+
+        def apply(candidate, _running):
+            seen["candidate"] = candidate
+            return True, "Settings saved."
+
+        class FakeTask:
+            def __init__(self, function, _parent=None):
+                self.function = function
+                self.done = SimpleNamespace(connect=lambda _callback: None)
+
+            def start(self):
+                self.function()
+
+        with (
+            patch("glance.desktop.pages.Task", FakeTask),
+            patch("glance.desktop.pages.backend.agent_running", return_value=False),
+            patch("glance.desktop.pages.backend.apply_settings", side_effect=apply),
+        ):
+            page._save()
+        self.assertFalse(seen["candidate"].any_identity)
+        self.assertEqual(seen["candidate"].identity, "Sampath")
 
     def test_owner_change_stops_agent_before_saving_then_restarts(self) -> None:
         events = []
@@ -628,6 +761,255 @@ class SettingsIdentityTests(unittest.TestCase):
         stop.assert_not_called()
 
 
+class FaceGateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+        def stop_animation_loader() -> None:
+            import glance.desktop.capture_widgets as capture_widgets
+            capture_widgets._stop_loader()
+
+        cls.addClassCleanup(stop_animation_loader)
+
+    class FakeCamera(QObject):
+        gate = Signal(str, float, str)
+        failed = Signal(str)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate_enabled = False
+            self.gate_calls: list[bool] = []
+
+        def set_gate(self, active: bool) -> None:
+            self.gate_enabled = active
+            self.gate_calls.append(active)
+
+    def make_dialog(self, camera, threshold: float = 0.60):
+        events: list = []
+        parent = QWidget()
+        dialog = FaceGateDialog(
+            parent, "Password", camera=camera, threshold=threshold,
+            acquire=lambda: events.append("acquire"),
+            release=lambda: events.append("release"),
+            restart=lambda owner: events.append(("restart", owner)),
+        )
+        self.addCleanup(parent.deleteLater)
+        self.addCleanup(dialog.close)
+        return dialog, events, parent
+
+    def show_dialog(self, dialog, *, people=None, models: bool = True,
+                    timeout: float = face_gate.SCAN_SECONDS) -> None:
+        dialog._scan_timer.setInterval(int(timeout * 1000))
+        if people is None:
+            people = [{"name": "Sampath", "samples": 9}]
+        with (
+            patch.object(face_gate.backend, "identity_summary", return_value=people),
+            patch.object(face_gate.backend, "models_ready", return_value=models),
+        ):
+            dialog.show()
+            QTest.qWait(20)
+
+    def test_three_stable_matches_accept_the_dialog(self) -> None:
+        camera = self.FakeCamera()
+        dialog, events, _parent = self.make_dialog(camera)
+        with patch.object(face_gate, "SUCCESS_HOLD_MS", 0):
+            self.show_dialog(dialog)
+            self.assertTrue(dialog.is_scanning())
+            self.assertTrue(camera.gate_enabled)
+            self.assertEqual(events, ["acquire"])
+            for _ in range(2):
+                camera.gate.emit("Sampath", 0.91, "")
+                self.assertTrue(dialog.is_scanning())
+            camera.gate.emit("Sampath", 0.91, "")
+            QTest.qWait(100)
+            self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertEqual(dialog.matched_name, "Sampath")
+        self.assertEqual(dialog.animation.state, "success")
+        self.assertFalse(camera.gate_enabled)
+        self.assertEqual(events, ["acquire", "release"])
+
+    def test_a_low_score_or_a_different_face_breaks_the_streak(self) -> None:
+        camera = self.FakeCamera()
+        dialog, _events, _parent = self.make_dialog(camera, threshold=0.70)
+        self.show_dialog(dialog, timeout=0.2)
+        camera.gate.emit("Sampath", 0.91, "")
+        camera.gate.emit("Sampath", 0.91, "")
+        self.assertEqual(dialog.streak(), 2)
+        camera.gate.emit("Anu", 0.95, "")
+        self.assertEqual(dialog.streak(), 1)
+        camera.gate.emit("Anu", 0.44, "")
+        self.assertEqual(dialog.streak(), 0)
+        camera.gate.emit("Anu", 0.95, "")
+        camera.gate.emit("Anu", 0.95, "")
+        QTest.qWait(300)
+        self.assertFalse(dialog.is_scanning())
+        self.assertEqual(dialog.matched_name, "")
+        self.assertEqual(dialog.animation.state, "failure")
+        self.assertTrue(dialog.retry_visible())
+
+    def test_timeout_fails_then_retry_scans_again(self) -> None:
+        camera = self.FakeCamera()
+        dialog, events, _parent = self.make_dialog(camera)
+        with patch.object(face_gate, "SUCCESS_HOLD_MS", 0):
+            self.show_dialog(dialog, timeout=0.08)
+            QTest.qWait(200)
+            self.assertFalse(dialog.is_scanning())
+            self.assertTrue(dialog.retry_visible())
+            self.assertIn("verify", dialog.status.text().lower())
+            self.assertFalse(camera.gate_enabled)
+            self.assertEqual(events, ["acquire", "release"])
+
+            with (
+                patch.object(face_gate.backend, "identity_summary",
+                             return_value=[{"name": "Sampath", "samples": 9}]),
+                patch.object(face_gate.backend, "models_ready", return_value=True),
+            ):
+                dialog.retry.click()
+                QTest.qWait(20)
+                self.assertTrue(dialog.is_scanning())
+                self.assertTrue(camera.gate_enabled)
+                self.assertIn(("restart", "face-gate"), events)
+                for _ in range(3):
+                    camera.gate.emit("Sampath", 0.94, "")
+                QTest.qWait(100)
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertEqual(dialog.matched_name, "Sampath")
+
+    def test_missing_models_fail_closed_without_starting_the_camera(self) -> None:
+        camera = self.FakeCamera()
+        dialog, events, _parent = self.make_dialog(camera)
+        self.show_dialog(dialog, models=False)
+        self.assertFalse(dialog.is_scanning())
+        self.assertFalse(dialog.retry_visible())
+        self.assertIn("models", dialog.status.text().lower())
+        self.assertEqual(events, [])
+        self.assertFalse(camera.gate_enabled)
+
+    def test_no_enrolled_faces_fails_closed_without_starting_the_camera(self) -> None:
+        camera = self.FakeCamera()
+        dialog, events, _parent = self.make_dialog(camera)
+        self.show_dialog(dialog, people=[])
+        self.assertFalse(dialog.is_scanning())
+        self.assertFalse(dialog.retry_visible())
+        self.assertIn("enrolled", dialog.status.text().lower())
+        self.assertEqual(events, [])
+        self.assertFalse(camera.gate_enabled)
+
+    def test_camera_failure_blocks_the_page_and_offers_retry(self) -> None:
+        camera = self.FakeCamera()
+        dialog, _events, _parent = self.make_dialog(camera)
+        self.show_dialog(dialog)
+        camera.failed.emit("the camera is busy")
+        self.assertFalse(dialog.is_scanning())
+        self.assertTrue(dialog.retry_visible())
+        self.assertIn("camera", dialog.status.text().lower())
+        self.assertEqual(dialog.result(), QDialog.Rejected)
+        self.assertFalse(camera.gate_enabled)
+
+
+class NavigationGateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    class FakeGate:
+        calls: list[str] = []
+        result = QDialog.Accepted
+
+        def __init__(self, _parent, purpose: str):
+            type(self).calls.append(purpose)
+
+        def exec(self) -> int:
+            return type(self).result
+
+    def setUp(self) -> None:
+        self.FakeGate.calls = []
+        self.FakeGate.result = QDialog.Accepted
+
+    def window(self) -> MainWindow:
+        return MainWindow()
+
+    def test_password_opens_after_an_accepted_face_check(self) -> None:
+        window = self.window()
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main.backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 9}]),
+        ):
+            window.nav.buttons[2].click()
+        self.assertEqual(window.stack.currentIndex(), 2)
+        self.assertEqual(self.FakeGate.calls, ["Password"])
+        window.close()
+
+    def test_cancelled_face_check_keeps_the_previous_page(self) -> None:
+        window = self.window()
+        self.FakeGate.result = QDialog.Rejected
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main.backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 9}]),
+        ):
+            window.nav.buttons[2].click()
+        self.assertEqual(window.stack.currentIndex(), 0)
+        self.assertTrue(window.nav.buttons[0].isChecked())
+        self.assertFalse(window.nav.buttons[2].isChecked())
+        window.close()
+
+    def test_face_check_is_skipped_before_anyone_is_enrolled(self) -> None:
+        window = self.window()
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main.backend, "identity_summary", return_value=[]),
+        ):
+            window.nav.buttons[2].click()
+        self.assertEqual(window.stack.currentIndex(), 2)
+        self.assertEqual(self.FakeGate.calls, [])
+        window.close()
+
+    def test_your_face_requires_a_stored_password_first(self) -> None:
+        window = self.window()
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main.backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 9}]),
+            patch.object(desktop_main.backend, "credential_status",
+                         return_value={"present": False, "account": ""}),
+            patch.object(desktop_main.QMessageBox, "information") as inform,
+        ):
+            window.nav.buttons[1].click()
+        self.assertEqual(window.stack.currentIndex(), 2)
+        self.assertEqual(self.FakeGate.calls, ["Password"])
+        inform.assert_called_once()
+        self.assertIn("password", inform.call_args.args[2].lower())
+        window.close()
+
+    def test_your_face_opens_after_password_and_face_check(self) -> None:
+        window = self.window()
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main.backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 9}]),
+            patch.object(desktop_main.backend, "credential_status",
+                         return_value={"present": True, "account": "PC\\sampa"}),
+        ):
+            window.nav.buttons[1].click()
+        self.assertEqual(window.stack.currentIndex(), 1)
+        self.assertEqual(self.FakeGate.calls, ["Your Face"])
+        window.close()
+
+    def test_dashboard_password_shortcut_is_gated(self) -> None:
+        window = self.window()
+        with (
+            patch.object(window, "request_face_gate", return_value=False) as gate,
+            patch("glance.desktop.pages.PasswordDialog") as dialog,
+        ):
+            window.dashboard._set_password()
+        gate.assert_called_once_with("Password")
+        dialog.assert_not_called()
+        window.close()
+
+
 class StartupModelsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -669,11 +1051,38 @@ class EnrollmentUiTests(unittest.TestCase):
     def make_page(self) -> EnrollPage:
         return EnrollPage(SimpleNamespace())
 
+    def test_enrollment_animation_precedes_name_label_and_input(self) -> None:
+        page = self.make_page()
+        form_layout = page.name_edit.parentWidget().layout()
+        name_title = next(
+            widget for widget in page.name_edit.parentWidget().findChildren(QLabel)
+            if widget.objectName() == "h2" and widget.text() == "Name"
+        )
+        self.assertLess(form_layout.indexOf(page.animation), form_layout.indexOf(name_title))
+        self.assertLess(form_layout.indexOf(page.animation), form_layout.indexOf(page.name_edit))
+
+    def test_identity_capture_card_uses_active_theme_selectors(self) -> None:
+        from glance.desktop.capture_widgets import IdentityCaptureCard
+
+        card = IdentityCaptureCard("Sampath", 12)
+        self.assertEqual(card.objectName(), "identityCaptureCard")
+        self.assertEqual(card.name.objectName(), "identityName")
+        self.assertEqual(card.detail.objectName(), "identityDetail")
+        self.assertNotIn("#22292f", card.styleSheet())
+        for palette in (theme.DARK, theme.LIGHT):
+            stylesheet = theme.build_stylesheet(palette)
+            for selector in (
+                "QFrame#identityCaptureCard",
+                "QLabel#identityName",
+                "QLabel#identityDetail",
+            ):
+                self.assertIn(selector, stylesheet)
+
     def test_capture_is_disabled_until_camera_ready(self) -> None:
         page = self.make_page()
         self.assertFalse(page.capture_button.isEnabled())
 
-    def test_failed_capture_does_not_increment_samples_and_reenables_button(self) -> None:
+    def test_stale_failed_capture_does_not_change_enrollment(self) -> None:
         page = self.make_page()
         page._camera_ready = True
         page._capture_pending = True
@@ -681,7 +1090,56 @@ class EnrollmentUiTests(unittest.TestCase):
         page.on_capture(SimpleNamespace(embedding=None, ok=False, message="No face in view"))
         self.assertEqual(len(page._samples), 0)
         self.assertTrue(page.capture_button.isEnabled())
-        self.assertIn("No face", page.quality.text())
+        self.assertEqual(page.quality.text(), "No samples yet")
+
+    def test_eighteenth_good_sample_saves_session_automatically(self) -> None:
+        page = self.make_page()
+        page.name_edit.setText("Taylor")
+        page._session_name = "Taylor"
+        page._auto_active = True
+        page.window.camera = SimpleNamespace(reload_store=lambda: None)
+        page.window.on_identities_changed = lambda name: None
+        base = np.zeros(128, dtype=np.float32)
+        samples = []
+        for index in range(1, 19):
+            embedding = base.copy()
+            embedding[0] = 1.0
+            embedding[index] = .15
+            embedding /= np.linalg.norm(embedding)
+            samples.append(embedding)
+        poses = ([(0, .5)] * 6 + [(-.2, .5)] * 3 + [( .2, .5)] * 3
+                 + [(0, .35)] * 3 + [(0, .65)] * 3)
+
+        with (
+            patch("glance.desktop.pages.IdentityStore") as store_class,
+            patch("glance.desktop.pages.backend.identity_summary", return_value=[]),
+        ):
+            for embedding, pose in zip(samples, poses):
+                page.on_capture(SimpleNamespace(
+                    embedding=embedding, ok=True, pose=pose, message="Good sample",
+                ))
+
+        self.assertEqual(store_class.return_value.add_sample.call_count, 18)
+        store_class.return_value.save.assert_called_once()
+        self.assertEqual(page.animation.state, "success")
+        self.assertFalse(page._auto_active)
+        self.assertIn("Saved 18 samples", page.quality.text())
+
+    def test_enrollment_requires_a_stored_password_before_capture(self) -> None:
+        visited: list[int] = []
+        window = SimpleNamespace(
+            _windows_password_stored=lambda: False,
+            _navigate=lambda index: visited.append(index),
+        )
+        page = EnrollPage(window)
+        page.name_edit.setText("Taylor")
+        page._camera_ready = True
+        with patch("glance.desktop.pages.QMessageBox.information") as inform:
+            page._toggle_capture()
+        self.assertFalse(page._auto_active)
+        self.assertEqual(visited, [2])
+        inform.assert_called_once()
+        self.assertIn("password", page.quality.text().lower())
 
     def test_page_handoff_cancels_camera_stop_but_leaving_pages_stops_it(self) -> None:
         class FakeWorker:
