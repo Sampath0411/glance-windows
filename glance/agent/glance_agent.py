@@ -177,11 +177,13 @@ def log(message: str) -> None:
 class Verifier:
     def __init__(self, threshold: float = 0.6, timeout: float = 90.0,
                  require_stable: int = 3, identity: str | None = None,
+                 any_identity: bool = False,
                  paths: RuntimePaths | None = None) -> None:
         self.threshold = threshold
         self.timeout = timeout
         self.require_stable = require_stable
         self.identity = identity
+        self.any_identity = any_identity
         self.paths = paths or resolve_runtime_paths()
 
     def run(self, stop: threading.Event, is_locked=None) -> str:
@@ -191,18 +193,21 @@ class Verifier:
         deliberately not a desktop probe: OpenInputDesktop was tried and reported
         "unlocked" seconds after a genuine lock, which silently disabled unlocks.
         """
-        if not self.identity or not self.identity.strip():
+        if not self.any_identity and (not self.identity or not self.identity.strip()):
             return "error: no unlock identity selected"
 
         pipeline = GlancePipeline(self.paths.identities_path, self.threshold)
         if not pipeline.store.identities:
             return "error: no enrolled identities"
 
-        if not any(identity.name == self.identity for identity in pipeline.store.identities):
+        if not self.any_identity and not any(
+            identity.name == self.identity for identity in pipeline.store.identities
+        ):
             return "error: selected identity is not enrolled"
 
-        # The selected identity is mandatory even when only one person is enrolled.
-        # A missing or stale selection must never implicitly authorize everyone.
+        # In specific mode the selected identity is mandatory even when only one
+        # person is enrolled. A missing or stale selection must never implicitly
+        # authorize everyone; anyone mode is an explicit setting.
 
         evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.LIGHT)
         cap = pipeline.open_camera(0)
@@ -240,7 +245,7 @@ class Verifier:
                     continue
 
                 identity, centroid, nearest = match
-                if self.identity is not None and identity.name != self.identity:
+                if not self.any_identity and identity.name != self.identity:
                     evaluator.reset()
                     history.clear()
                     continue
@@ -295,6 +300,46 @@ class SessionWatcher:
         self.worker: threading.Thread | None = None
         self.running = True
         self.locked = False
+        from .idle_lock import IdlePolicy
+        self.idle_policy = IdlePolicy()
+        self._idle_lock_input = None
+        self._idle_attempt = -10.0
+        self._last_idle_poll = 0.0
+
+    def _check_idle(self):
+        from .idle_lock import idle_seconds, input_ticks
+        now = time.monotonic()
+        if now - self._last_idle_poll < 1:
+            return
+        self._last_idle_poll = now
+        ticks = input_ticks()
+        if ticks is None:
+            return
+        current, last_input = ticks
+        if self._idle_lock_input is not None:
+            if self.locked and last_input != self._idle_lock_input:
+                self._idle_lock_input = None
+                self._start_verification()
+            elif not self.locked and now - self._idle_attempt > 10:
+                # No lock event arrived: retry later rather than blocking forever.
+                self._idle_lock_input = None
+            return
+        try:
+            config = json.loads(self.verifier.paths.config_path.read_text(encoding="utf-8-sig"))
+            seconds = idle_seconds(config) if isinstance(config, dict) else 0
+        except (OSError, ValueError):
+            return
+        if (now - self._idle_attempt >= 10 and
+                self.idle_policy.due(current, last_input, seconds, self.locked)):
+            self._idle_attempt = now
+            # Set the gate before LockWorkStation: its session notification is
+            # queued on this same thread and is handled after this method returns.
+            self._idle_lock_input = last_input
+            if user32.LockWorkStation():
+                self.idle_policy.locked(last_input)
+                log("idle lock requested; face unlock waits for keyboard or mouse input")
+            else:
+                self._idle_lock_input = None
 
     def _start_verification(self) -> None:
         if self.worker is not None and self.worker.is_alive():
@@ -324,10 +369,12 @@ class SessionWatcher:
                 if wparam == WTS_SESSION_LOCK:
                     log("session locked")
                     watcher.locked = True
-                    watcher._start_verification()
+                    if watcher._idle_lock_input is None:
+                        watcher._start_verification()
                 elif wparam == WTS_SESSION_UNLOCK:
                     log("session unlocked")
                     watcher.locked = False
+                    watcher._idle_lock_input = None
                     watcher._stop_verification()
                 return 0
             # Deferring is mandatory: returning 0 from WM_NCCREATE aborts window
@@ -363,6 +410,7 @@ class SessionWatcher:
                 while user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
                     user32.TranslateMessage(ctypes.byref(message))
                     user32.DispatchMessageW(ctypes.byref(message))
+                self._check_idle()
                 time.sleep(0.05)
         finally:
             wtsapi.WTSUnRegisterSessionNotification(hwnd)
@@ -385,6 +433,13 @@ def resolve_identity(config: dict, cli_identity: str | None) -> str | None:
     return cli_identity.strip() if cli_identity and cli_identity.strip() else None
 
 
+def resolve_any_identity(config: dict, cli_any: bool | None = None) -> bool:
+    """Anyone-enrolled is the default unless a config explicitly opts out."""
+    if cli_any is not None:
+        return bool(cli_any)
+    return config.get("any_identity") is not False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m glance.agent.glance_agent",
@@ -395,8 +450,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=None,
                         help="give up this many seconds after lock (default 90)")
     parser.add_argument("--identity", default=None,
-                        help="which enrolled identity may unlock (required if more "
-                             "than one is enrolled)")
+                        help="which enrolled identity may unlock (ignored in anyone mode)")
+    parser.add_argument("--any-identity", dest="any_identity", action="store_true",
+                        default=None,
+                        help="allow any enrolled face to unlock")
+    parser.add_argument("--single-identity", dest="any_identity", action="store_false",
+                        default=None,
+                        help="restrict unlock to --identity")
     parser.add_argument("--simulate", action="store_true",
                         help="run one verification pass immediately (no lock needed)")
     parser.add_argument("--self-test", action="store_true",
@@ -419,13 +479,14 @@ def main() -> int:
             # A present but unreadable settings file is not the same as no settings:
             # falling back to an old scheduled-task argument could authorize the wrong
             # person after a failed settings write. Treat corruption as no selection.
-            config = {"identity": ""}
+            config = {"identity": "", "any_identity": False}
 
     if args.threshold is None:
         args.threshold = float(config.get("threshold", 0.60))
     if args.timeout is None:
         args.timeout = float(config.get("timeout", 90.0))
-    args.identity = resolve_identity(config, args.identity)
+    args.any_identity = resolve_any_identity(config, args.any_identity)
+    args.identity = None if args.any_identity else resolve_identity(config, args.identity)
 
     if not claim_single_instance():
         log("another agent is already running - exiting")
@@ -441,6 +502,7 @@ def main() -> int:
         log(f"session id : {grant_mod.session_id()}")
         pipeline = GlancePipeline(paths.identities_path, args.threshold)
         log(f"identities : {[i.name for i in pipeline.store.identities]}")
+        log(f"scope      : {'any enrolled face' if args.any_identity else args.identity}")
         cap = pipeline.open_camera(0)
         if cap.isOpened():
             ok, frame = cap.read()
@@ -450,7 +512,8 @@ def main() -> int:
         cap.release()
         return 0
 
-    verifier = Verifier(args.threshold, args.timeout, identity=args.identity, paths=paths)
+    verifier = Verifier(args.threshold, args.timeout, identity=args.identity,
+                        any_identity=args.any_identity, paths=paths)
 
     if args.simulate:
         outcome = verifier.run(threading.Event())

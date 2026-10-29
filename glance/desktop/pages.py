@@ -30,6 +30,8 @@ from ..core import IdentityStore
 from . import backend
 from .models_setup import ModelsDialog
 from .navigation import navigation_icon
+from .enrollment import EnrollmentSession, TARGET
+from .capture_widgets import IdentityCaptureCard, ScanAnimation
 from .theme import ACCENT, DANGER, MUTED, WARN, Card, Dot, Preview
 from .settings_widgets import (
     CheckBox,
@@ -198,7 +200,24 @@ class Dashboard(QWidget):
         preferences.add_row(SettingsRow("Start when I sign in", "Run protection automatically after Windows sign-in.", self.autostart))
         self.autostart.setText("")
         self.autostart.setAccessibleName("Run protection when I sign in")
+        self.idle_lock = CheckBox()
+        self.idle_lock.setAccessibleName("Automatically lock when idle")
+        self.idle_lock.setChecked(window.settings.idle_lock_enabled)
+        self.idle_minutes = NumberField()
+        self.idle_minutes.setRange(1, 120)
+        self.idle_minutes.setSuffix(" min")
+        self.idle_minutes.setValue(window.settings.idle_lock_minutes)
+        self.idle_minutes.setEnabled(self.idle_lock.isChecked())
+        self.idle_minutes.setFixedWidth(120)
+        preferences.add_row(SettingsRow("Auto-lock when idle",
+            "No keyboard or mouse input. Requires background protection running.", self.idle_lock))
+        preferences.add_row(SettingsRow("Lock after",
+            "After an idle lock, press a key or move the mouse to start face unlock.", self.idle_minutes))
+        self.idle_status = _muted("")
+        self.idle_lock.toggled.connect(self._save_idle)
+        self.idle_minutes.valueChanged.connect(self._save_idle)
         layout.addWidget(preferences)
+        layout.addWidget(self.idle_status)
         layout.addWidget(_muted("Your Windows PIN and password are still available."))
 
         # camera
@@ -238,6 +257,20 @@ class Dashboard(QWidget):
         value_label.setObjectName("rowTitle")
         row.trailing_layout.insertWidget(0, value_label)
         return row, value_label, row.subtitle, row.trailing_layout
+
+    def _save_idle(self, *_args):
+        from dataclasses import replace
+        candidate = replace(self.window.settings, idle_lock_enabled=self.idle_lock.isChecked(),
+                            idle_lock_minutes=self.idle_minutes.value())
+        try:
+            candidate.save()
+        except OSError as error:
+            self.idle_status.setText(f"Could not save auto-lock: {error}")
+            return
+        self.window.settings = candidate
+        self.idle_minutes.setEnabled(candidate.idle_lock_enabled)
+        self.idle_status.setText("Auto-lock saved; applies while background protection runs."
+                                 if candidate.idle_lock_enabled else "Auto-lock off.")
 
     # -- lifecycle --------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: N802
@@ -295,7 +328,9 @@ class Dashboard(QWidget):
         elif running:
             self.status_dot.set_color(ACCENT)
             self.status_title.setText("Protection on")
-            who = settings.identity or "no identity selected"
+            who = "any enrolled face" if settings.any_identity else (
+                settings.identity or "no identity selected"
+            )
             self.status_detail.setText(
                 f"Waiting for a lock · {who} · threshold {settings.threshold:.2f}"
             )
@@ -323,12 +358,20 @@ class Dashboard(QWidget):
         identities = snapshot["identities"]
         chosen = settings.identity or ""
         samples = next((i["samples"] for i in identities if i["name"] == chosen), 0)
-        if identities:
-            self.identity_card[1].setText(chosen or f"{len(identities)} enrolled")
-            self.identity_card[2].setText(f"{samples} samples" if chosen else "Select one in Recognition")
-        else:
+        if not identities:
             self.identity_card[1].setText("None")
             self.identity_card[2].setText("Enrol a face to begin")
+        elif settings.any_identity:
+            self.identity_card[1].setText("Anyone enrolled")
+            self.identity_card[2].setText(
+                f"Any of {len(identities)} enrolled face"
+                f"{'' if len(identities) == 1 else 's'} may unlock"
+            )
+        else:
+            self.identity_card[1].setText(chosen)
+            self.identity_card[2].setText(
+                f"{samples} samples" if chosen else "Select one in Recognition"
+            )
 
         self.unlock_card[1].setText("—")
         line = snapshot["unlock"]
@@ -376,6 +419,8 @@ class Dashboard(QWidget):
             self.autostart.blockSignals(False)
 
     def _set_password(self) -> None:
+        if not self.window.request_face_gate("Password"):
+            return
         account = backend.credential_status()["account"] or backend.ACCOUNT_HINT
         dialog = PasswordDialog(self, account)
         if dialog.exec() == QDialog.Accepted:
@@ -389,7 +434,14 @@ class EnrollPage(QWidget):
     def __init__(self, window):
         super().__init__()
         self.window = window
-        self._samples: list[np.ndarray] = []
+        self._session = EnrollmentSession()
+        self._samples = self._session.samples
+        self._auto_active = False
+        self._discard_pending = False
+        self._session_name = ""
+        self._capture_timer = QTimer(self)
+        self._capture_timer.setInterval(850)
+        self._capture_timer.timeout.connect(self._capture)
         self._camera_ready = False
         self._capture_pending = False
 
@@ -398,8 +450,8 @@ class EnrollPage(QWidget):
         layout.setSpacing(18)
         layout.addWidget(_page_header(
             "Your Face",
-            "Look at the camera in even light and capture eight or more samples, "
-            "turning your head slightly between them.",
+            "Automatically capture 18 clear samples. Keep your full face visible "
+            "and follow the gentle angle prompts.",
             1,
         ))
 
@@ -422,10 +474,10 @@ class EnrollPage(QWidget):
         left.addLayout(camera_row)
 
         row = QHBoxLayout()
-        self.capture_button = QPushButton("Capture sample")
+        self.capture_button = QPushButton("Start capture")
         self.capture_button.setObjectName("primary")
         self.capture_button.setEnabled(False)
-        self.capture_button.clicked.connect(self._capture)
+        self.capture_button.clicked.connect(self._toggle_capture)
         row.addWidget(self.capture_button)
         self.counter = _muted("0 samples")
         row.addWidget(self.counter)
@@ -440,10 +492,16 @@ class EnrollPage(QWidget):
         form_layout = QVBoxLayout(form)
         form_layout.setContentsMargins(18, 16, 18, 16)
         form_layout.setSpacing(8)
-        form_layout.addWidget(_title("Name", "h2"))
+        self.animation = ScanAnimation()
+        form_layout.addWidget(self.animation, 0, Qt.AlignHCenter)
+        self.name_title = _title("Name", "h2")
+        form_layout.addWidget(self.name_title)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Your name")
         form_layout.addWidget(self.name_edit)
+        self.capture_card = IdentityCaptureCard("New identity")
+        form_layout.addWidget(self.capture_card)
+        self.name_edit.textChanged.connect(self._update_capture_name)
         form_layout.addWidget(_muted("Capturing into an existing name adds samples to that "
                                      "person instead of creating a second identity."))
         self.quality = _muted("No samples yet")
@@ -451,7 +509,8 @@ class EnrollPage(QWidget):
         form_layout.addWidget(self.quality)
 
         buttons = QHBoxLayout()
-        self.save_button = QPushButton("Save samples")
+        self.save_button = QPushButton("Retry save")
+        self.save_button.setEnabled(False)
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self._save)
         self.clear_button = QPushButton("Clear")
@@ -483,6 +542,7 @@ class EnrollPage(QWidget):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
+        self._pause_capture()
         self.window.release_camera("enroll")
 
     def on_preview(self, image, info) -> None:
@@ -498,6 +558,7 @@ class EnrollPage(QWidget):
         self._refresh_capture_button()
 
     def on_camera_failed(self, message: str) -> None:
+        self._pause_capture()
         self._camera_ready = False
         self._capture_pending = False
         if not backend.models_ready():
@@ -511,33 +572,81 @@ class EnrollPage(QWidget):
         self._refresh_capture_button()
 
     def _refresh_capture_button(self) -> None:
-        self.capture_button.setEnabled(self._camera_ready and not self._capture_pending)
+        self.capture_button.setEnabled(self._camera_ready and not self._session.complete)
+        self.capture_button.setText("Pause capture" if self._auto_active else
+                                    "Resume capture" if self._samples else "Start capture")
+
+    def _pause_capture(self):
+        self._auto_active = False
+        self._capture_timer.stop()
+        self._discard_pending = self._capture_pending
+        self._refresh_capture_button()
+
+    def _toggle_capture(self):
+        if self._auto_active:
+            self._pause_capture()
+            self.quality.setText("Capture paused; your samples are kept.")
+            return
+        if not self.window._windows_password_stored():
+            self.quality.setText("Set your Windows password before enrolling a face.")
+            self.quality.setStyleSheet(f"color: {WARN};")
+            QMessageBox.information(
+                self, "Glance",
+                "Glance needs your Windows password before it can enroll a face. "
+                "Set it on the Password page first.",
+            )
+            self.window._navigate(2)
+            return
+        name = self.name_edit.text().strip()
+        if not name:
+            self.quality.setText("Give this face a name first.")
+            self.name_edit.setFocus()
+            return
+        if not self._camera_ready or self._capture_pending or self._session.complete:
+            return
+        self._session_name = name
+        self.name_edit.setEnabled(False)
+        self._auto_active = True
+        self.animation.show_state("idle")
+        self._capture_timer.start()
+        self._refresh_capture_button()
+        self._capture()
+
+    def _update_capture_name(self, text: str) -> None:
+        self.capture_card.name.setText(text.strip() or "New identity")
 
     def on_capture(self, capture) -> None:
         self._capture_pending = False
         self._refresh_capture_button()
+        if self._discard_pending:
+            self._discard_pending = False
+            return
+        if not self._auto_active:
+            return
         if capture.embedding is None or not capture.ok:
             self.quality.setText(capture.message or "Capture failed")
             self.quality.setStyleSheet(f"color: {WARN};")
+            if self._auto_active and self.animation.state != "failure":
+                self.animation.show_state("failure")
             return
-
-        self._samples.append(capture.embedding)
-        self.counter.setText(f"{len(self._samples)} samples")
-        note = capture.message
-        if capture.match_name:
-            note += f" · looks like {capture.match_name} ({capture.match_score:.2f})"
+        accepted, note = self._session.accept(capture.embedding, capture.pose)
+        self.counter.setText(f"{len(self._samples)} / {TARGET} samples")
+        self.capture_card.set_count(len(self._samples))
         self.quality.setText(note)
-        self.quality.setStyleSheet(f"color: {ACCENT};")
+        self.quality.setStyleSheet(f"color: {ACCENT if accepted else WARN};")
+        if accepted:
+            self.animation.show_state("idle")
+        if self._session.complete:
+            self._pause_capture()
+            self._save()
 
     # -- actions ----------------------------------------------------------
     def _capture(self) -> None:
-        if not self._camera_ready or self._capture_pending:
+        if not self._auto_active or not self._camera_ready or self._capture_pending:
             return
         if self.window.camera.request_capture():
             self._capture_pending = True
             self._refresh_capture_button()
-            self.quality.setText("Capturing sample…")
-            self.quality.setStyleSheet("")
 
     def _retry_camera(self) -> None:
         if not backend.models_ready():
@@ -557,18 +666,26 @@ class EnrollPage(QWidget):
         self.window.retry_camera("enroll")
 
     def _clear(self) -> None:
-        self._samples.clear()
+        self._pause_capture()
+        self._session = EnrollmentSession()
+        self._samples = self._session.samples
+        self._session_name = ""
+        self.name_edit.setEnabled(True)
+        self.capture_card.set_count(0)
+        self.animation.show_state("idle")
+        self.save_button.setEnabled(False)
+        self._refresh_capture_button()
         self.counter.setText("0 samples")
         self.quality.setText("No samples yet")
         self.quality.setStyleSheet("")
 
     def _save(self) -> None:
-        name = self.name_edit.text().strip()
+        name = self._session_name
         if not name:
             QMessageBox.information(self, "Glance", "Give this face a name first.")
             return
-        if len(self._samples) < 3:
-            QMessageBox.information(self, "Glance", "Capture at least three samples.")
+        if not self._session.complete:
+            self.quality.setText("Collect all 18 good samples before saving.")
             return
 
         try:
@@ -577,12 +694,19 @@ class EnrollPage(QWidget):
                 store.add_sample(name, embedding)
             store.save()
         except Exception as error:  # noqa: BLE001
-            QMessageBox.warning(self, "Glance", f"Could not save: {error}")
+            self.quality.setText(f"Could not save: {error}. Samples kept; use Retry save.")
+            self.save_button.setEnabled(True)
+            self.animation.show_state("failure")
             return
 
         count = len(self._samples)
-        self._samples.clear()
-        self.counter.setText("0 samples")
+        self._session = EnrollmentSession()
+        self._samples = self._session.samples
+        self.counter.setText("18 / 18 · saved")
+        self.name_edit.setEnabled(True)
+        self.save_button.setEnabled(False)
+        self.animation.show_state("success")
+        self._refresh_capture_button()
         self.quality.setText(f"Saved {count} samples for {name}")
         self.quality.setStyleSheet(f"color: {ACCENT};")
         self.window.camera.reload_store()
@@ -605,12 +729,7 @@ class EnrollPage(QWidget):
             row = QWidget()
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
-            label = QLabel(f"{person['name']}")
-            detail = QLabel(f"{person['samples']} samples")
-            detail.setObjectName("muted")
-            layout.addWidget(label)
-            layout.addWidget(detail)
-            layout.addStretch(1)
+            layout.addWidget(IdentityCaptureCard(person['name'], person['samples']), 1)
 
             remove = QPushButton("Remove")
             remove.setObjectName("danger")
@@ -657,7 +776,7 @@ class SettingsPage(QWidget):
 
         layout.addWidget(_page_header(
             "Recognition",
-            "Decide how confidently Glance must recognize you.",
+            "Decide who may unlock Windows and how confidently Glance must recognize them.",
             4,
         ))
 
@@ -670,7 +789,11 @@ class SettingsPage(QWidget):
         self.identity = Select()
         self.identity.currentIndexChanged.connect(self._selection_changed)
         form.addWidget(self.identity)
-        form.addWidget(_muted("Only the selected person can unlock this account. Choose an enrolled face to enable recognition."))
+        self.scope_note = _muted(
+            "Anyone enrolled can unlock Windows, pass the in-app face check, "
+            "change the saved password, and enroll new faces."
+        )
+        form.addWidget(self.scope_note)
 
         form.addWidget(_title("Matching profile", "h2"))
         self.presets = SegmentedTiles((
@@ -730,15 +853,15 @@ class SettingsPage(QWidget):
     def load(self) -> None:
         settings = self.window.settings
         self.identity.clear()
-        self.identity.addItem("Select a person…", None)
-        placeholder = self.identity.model().item(0)
-        if placeholder is not None:
-            placeholder.setEnabled(False)
+        self.identity.addItem("Anyone enrolled", "")
         people = backend.identity_summary()
         for person in people:
             self.identity.addItem(person["name"], person["name"])
-        index = self.identity.findData(settings.identity)
-        self.identity.setCurrentIndex(index if index > 0 else 0)
+        if settings.any_identity:
+            self.identity.setCurrentIndex(0)
+        else:
+            index = self.identity.findData(settings.identity)
+            self.identity.setCurrentIndex(index if index > 0 else 0)
         self._selection_changed()
 
         self.threshold.setValue(int(round(settings.threshold * 100)))
@@ -747,10 +870,22 @@ class SettingsPage(QWidget):
         self.status.setText("")
 
     def _selection_changed(self, *_args) -> None:
-        if hasattr(self, "save"):
-            selected = self.identity.currentData()
-            valid = isinstance(selected, str) and bool(selected)
-            self.save.setEnabled(valid and self._settings_task is None)
+        if not hasattr(self, "save"):
+            return
+        selected = self.identity.currentData()
+        valid = isinstance(selected, str)
+        self.save.setEnabled(valid and self._settings_task is None)
+        if hasattr(self, "scope_note"):
+            if selected:
+                self.scope_note.setText(
+                    f"Only {selected} may unlock Windows. Any enrolled face can still "
+                    "pass the in-app check, change the saved password, and enroll new faces."
+                )
+            else:
+                self.scope_note.setText(
+                    "Anyone enrolled can unlock Windows, pass the in-app face check, "
+                    "change the saved password, and enroll new faces."
+                )
 
     def _preset_chosen(self, key: str) -> None:
         value = self.PRESETS.get(key)
@@ -775,16 +910,20 @@ class SettingsPage(QWidget):
 
     def _save(self) -> None:
         selected = self.identity.currentData()
-        if not isinstance(selected, str) or not selected:
-            self.status.setText("Select exactly one person who may unlock.")
+        if not isinstance(selected, str):
+            self.status.setText("Choose who may unlock.")
             self.status.setStyleSheet(f"color: {DANGER};")
             return
+        anyone = selected == ""
 
         candidate = backend.Settings(
             threshold=self.threshold.value() / 100,
             timeout=float(self.timeout.value()),
-            identity=selected,
+            identity="" if anyone else selected,
+            any_identity=anyone,
             camera=self.window.settings.camera,
+            idle_lock_enabled=self.window.settings.idle_lock_enabled,
+            idle_lock_minutes=self.window.settings.idle_lock_minutes,
         )
         was_running = backend.agent_running()
 
@@ -907,7 +1046,7 @@ class PasswordPage(QWidget):
         layout.addWidget(self.credential)
         layout.addWidget(_title("Windows lock screen", "h2"))
         layout.addWidget(_muted(
-            "Enable only after enrolling and selecting a face and verifying your Windows password. "
+            "Enable only after enrolling a face and verifying your Windows password. "
             "Windows will ask for administrator approval before changing sign-in components. "
             "Your normal password and PIN sign-in remain available."
         ))

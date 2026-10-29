@@ -29,6 +29,15 @@ PREVIEW_MAX_WIDTH = 640
 PREVIEW_INTERVAL = 1 / 12.0
 DETECT_INTERVAL = 0.20      # 5 detections per second while the preview is open
 EMBED_INTERVAL = 1.0        # refresh the name label once a second
+GATE_INTERVAL = 0.5         # in-app face check status twice a second
+
+
+def full_face_in_frame(face, frame_shape) -> bool:
+    """Require a small safety margin around the detector's full face box."""
+    height, width = frame_shape[:2]
+    x1, y1, x2, y2 = face.bbox
+    return (x1 >= width * .025 and y1 >= height * .025 and
+            x2 <= width * .975 and y2 <= height * .975)
 
 
 @dataclass
@@ -40,6 +49,7 @@ class Capture:
     match_score: float = 0.0
     ok: bool = False
     message: str = ""
+    pose: tuple[float, float] | None = None
 
 
 @dataclass
@@ -53,6 +63,7 @@ class FrameInfo:
 class CameraWorker(QThread):
     preview = Signal(QImage, object)    # image, FrameInfo
     captured = Signal(object)           # Capture
+    gate = Signal(str, float, str)      # name, score, hint (in-app face check)
     ready = Signal()                    # opened camera and read first frame
     failed = Signal(str)
 
@@ -67,6 +78,7 @@ class CameraWorker(QThread):
         self._capture_pending = threading.Event()
         self._ready = threading.Event()
         self._reload = threading.Event()
+        self._gate = threading.Event()
         self._lock = threading.Lock()
 
     def start(self, priority=QThread.Priority.InheritPriority) -> None:
@@ -78,6 +90,7 @@ class CameraWorker(QThread):
         self._capture_pending.clear()
         self._ready.clear()
         self._reload.clear()
+        self._gate.clear()
         super().start(priority)
 
     # -- control ----------------------------------------------------------
@@ -101,11 +114,22 @@ class CameraWorker(QThread):
     def reload_store(self) -> None:
         self._reload.set()
 
+    def set_gate(self, active: bool) -> None:
+        """Quietly report matches for the in-app face check without capturing."""
+        if active:
+            self._gate.set()
+        else:
+            self._gate.clear()
+
+    def gate_active(self) -> bool:
+        return self._gate.is_set()
+
     def stop(self) -> None:
         self._stop.set()
         self._capture.clear()
         self._capture_pending.clear()
         self._ready.clear()
+        self._gate.clear()
 
     # -- thread -----------------------------------------------------------
     def run(self) -> None:
@@ -121,7 +145,7 @@ class CameraWorker(QThread):
         opened_index: int | None = None
         faces: list = []
         label, score = "", 0.0
-        last_detect = last_embed = last_preview = 0.0
+        last_detect = last_embed = last_preview = last_gate = 0.0
 
         try:
             while not self._stop.is_set():
@@ -183,13 +207,33 @@ class CameraWorker(QThread):
                     self.captured.emit(capture)
                     if capture.match_name:
                         label, score = capture.match_name, capture.match_score
-                elif faces and now - last_embed >= EMBED_INTERVAL:
+                elif not self._gate.is_set() and faces and now - last_embed >= EMBED_INTERVAL:
                     aligned = pipeline.aligner.align(frame, faces[0])
                     if aligned is not None:
                         embedding = pipeline.embedder.embed(aligned)
                         match = pipeline.store.best_match(embedding, threshold)
                         label, score = (match[0].name, match[2]) if match else ("", 0.0)
                         last_embed = now
+
+                if self._gate.is_set() and now - last_gate >= GATE_INTERVAL:
+                    last_gate = now
+                    if not faces:
+                        self.gate.emit("", 0.0, "No face in view")
+                    elif len(faces) > 1:
+                        self.gate.emit("", 0.0, "Only one face at a time")
+                    else:
+                        # Embed fresh for every gate result so three stable
+                        # matches really are three independent readings.
+                        aligned = pipeline.aligner.align(frame, faces[0])
+                        name, score = "", 0.0
+                        if aligned is not None:
+                            embedding = pipeline.embedder.embed(aligned)
+                            match = pipeline.store.best_match(embedding, threshold)
+                            if match:
+                                name, score = match[0].name, match[2]
+                        height, width = frame.shape[:2]
+                        small = faces[0].area / float(width * height) < GOOD_FACE_FRACTION
+                        self.gate.emit(name, score, "Move closer" if small else "")
 
                 if now - last_preview >= PREVIEW_INTERVAL:
                     last_preview = now
@@ -237,12 +281,35 @@ class CameraWorker(QThread):
 
         height, width = frame.shape[:2]
         fraction = faces[0].area / float(width * height)
+        x1, y1, x2, y2 = faces[0].bbox
+        if not full_face_in_frame(faces[0], frame.shape):
+            return Capture(message="Move back: keep your full face inside the frame")
+        if fraction < GOOD_FACE_FRACTION:
+            return Capture(message="Move closer to the camera")
+        points = np.asarray(faces[0].kps)
+        if (points.shape != (5, 2) or not np.isfinite(points).all() or
+                (points[:, 0] <= x1).any() or (points[:, 0] >= x2).any() or
+                (points[:, 1] <= y1).any() or (points[:, 1] >= y2).any()):
+            return Capture(message="Keep both eyes, nose and mouth visible")
+        eyes = (points[0] + points[1]) / 2
+        mouth = (points[3] + points[4]) / 2
+        eye_width = float(np.linalg.norm(points[1] - points[0]))
+        vertical = float(mouth[1] - eyes[1])
+        if eye_width < 10 or vertical < 10:
+            return Capture(message="Face the camera and move closer")
+        pose = (float((points[2, 0] - eyes[0]) / eye_width),
+                float((points[2, 1] - eyes[1]) / vertical))
         aligned = pipeline.aligner.align(frame, faces[0])
         if aligned is None:
             return Capture(message="Could not align the face")
 
         gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
         blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        if blur < GOOD_BLUR:
+            return Capture(message="The image is blurry; hold still in even light")
+        brightness = float(gray.mean())
+        if not 35 <= brightness <= 225:
+            return Capture(message="Use even lighting; avoid darkness or bright backlight")
         embedding = pipeline.embedder.embed(aligned)
 
         score_name, score = "", 0.0
@@ -261,7 +328,7 @@ class CameraWorker(QThread):
                            message="Slightly blurry, but usable")
 
         return Capture(embedding, fraction, blur, score_name, score, ok=True,
-                       message="Good sample")
+                       message="Good sample", pose=pose)
 
     @staticmethod
     def _to_image(frame: np.ndarray) -> QImage:

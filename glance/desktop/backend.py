@@ -84,6 +84,9 @@ class Settings:
     timeout: float = 90.0
     identity: str = ""
     camera: int = 0
+    idle_lock_enabled: bool = False
+    idle_lock_minutes: int = 5
+    any_identity: bool = True
 
     @classmethod
     def load(cls) -> "Settings":
@@ -99,6 +102,9 @@ class Settings:
             timeout=float(data.get("timeout", 90.0)),
             identity=str(data.get("identity") or ""),
             camera=int(data.get("camera", 0)),
+            idle_lock_enabled=data.get("idle_lock_enabled") is True,
+            idle_lock_minutes=_idle_minutes(data),
+            any_identity=data.get("any_identity") is not False,
         )
 
     def save(self) -> None:
@@ -107,9 +113,21 @@ class Settings:
             "timeout": float(self.timeout),
             "identity": self.identity,
             "camera": int(self.camera),
+            "idle_lock_enabled": bool(self.idle_lock_enabled),
+            "idle_lock_minutes": max(1, min(120, int(self.idle_lock_minutes))),
+            "any_identity": bool(self.any_identity),
         }
         PATHS.ensure_data_dir()
-        CONFIG_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp = CONFIG_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, CONFIG_PATH)
+
+
+def _idle_minutes(data):
+    try:
+        return max(1, min(120, int(data.get("idle_lock_minutes", 5))))
+    except (ValueError, TypeError, OverflowError):
+        return 5
 
 
 # --------------------------------------------------------------------------- #
@@ -264,7 +282,7 @@ def apply_settings(settings: Settings, restart_running_agent: bool) -> tuple[boo
         stop_agent()
         return False, "Settings saved, but the new agent did not start; protection is paused."
 
-    return True, "Settings saved and protection restarted with the selected identity."
+    return True, "Settings saved and protection restarted with the saved unlock scope."
 
 
 def lock_workstation() -> None:
@@ -489,8 +507,13 @@ def install_models(progress=None) -> tuple[bool, str]:
 
 def enable_windows_unlock() -> tuple[bool, str]:
     settings = Settings.load()
-    if not settings.identity or not any(person["name"] == settings.identity for person in identity_summary(0)):
-        return False, "Enroll and select a face before enabling Windows unlock."
+    people = identity_summary(0)
+    if not people:
+        return False, "Enroll a face before enabling Windows unlock."
+    if not settings.any_identity and not any(
+        person["name"] == settings.identity for person in people
+    ):
+        return False, "Select the face that may unlock before enabling Windows unlock."
     if not GRANT_TOOL.is_file():
         return False, "Glance credential helper is missing. Repair or reinstall Glance."
     if not credential_status(0).get("present"):

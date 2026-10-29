@@ -130,10 +130,41 @@ class PasswordHelperTests(unittest.TestCase):
         self.assertEqual(sid, "S-1-5-21-1-2-3-1001")
         run.assert_called_once_with([str(backend.GRANT_TOOL), "sid"])
 
-    def test_enable_unlock_requires_selected_identity_and_stored_password(self) -> None:
+    def test_enable_unlock_requires_an_enrolled_face_and_stored_password(self) -> None:
         with (
             patch.object(backend, "current_user_sid", return_value="S-1-5-21-1-2-3-1001"),
-            patch.object(backend.Settings, "load", return_value=backend.Settings(identity="")),
+            patch.object(backend.Settings, "load", return_value=backend.Settings(any_identity=True)),
+            patch.object(backend, "identity_summary", return_value=[]),
+            patch.object(backend, "credential_status", return_value={"present": True}),
+            patch.object(backend, "run_admin_operation") as admin,
+        ):
+            ok, message = backend.enable_windows_unlock()
+        self.assertFalse(ok)
+        self.assertIn("enroll", message.lower())
+        admin.assert_not_called()
+
+    def test_enable_unlock_accepts_anyone_mode_with_an_enrolled_face(self) -> None:
+        with (
+            patch.object(backend, "current_user_sid", return_value="S-1-5-21-1-2-3-1001"),
+            patch.object(backend.Settings, "load",
+                         return_value=backend.Settings(any_identity=True, identity="")),
+            patch.object(backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 18}]),
+            patch.object(backend, "credential_status", return_value={"present": True}),
+            patch.object(backend, "models_present", return_value=True),
+            patch.object(backend, "run_admin_operation", return_value=(True, "ok")) as admin,
+        ):
+            ok, message = backend.enable_windows_unlock()
+        self.assertTrue(ok, message)
+        admin.assert_called_once_with("install-provider", "S-1-5-21-1-2-3-1001")
+
+    def test_enable_unlock_rejects_a_stale_specific_identity(self) -> None:
+        with (
+            patch.object(backend, "current_user_sid", return_value="S-1-5-21-1-2-3-1001"),
+            patch.object(backend.Settings, "load",
+                         return_value=backend.Settings(any_identity=False, identity="Gone")),
+            patch.object(backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 18}]),
             patch.object(backend, "credential_status", return_value={"present": True}),
             patch.object(backend, "run_admin_operation") as admin,
         ):
@@ -141,6 +172,28 @@ class PasswordHelperTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("select", message.lower())
         admin.assert_not_called()
+
+    def test_settings_round_trip_preserves_the_unlock_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "agent_config.json"
+            with patch.object(backend, "CONFIG_PATH", path):
+                backend.Settings(identity="Sampath", any_identity=False).save()
+                specific = backend.Settings.load()
+                backend.Settings(any_identity=True).save()
+                anyone = backend.Settings.load()
+        self.assertFalse(specific.any_identity)
+        self.assertEqual(specific.identity, "Sampath")
+        self.assertTrue(anyone.any_identity)
+        self.assertEqual(anyone.identity, "")
+
+    def test_settings_default_to_anyone_when_the_scope_key_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "agent_config.json"
+            path.write_text(json.dumps({"identity": "Sampath"}), encoding="utf-8")
+            with patch.object(backend, "CONFIG_PATH", path):
+                loaded = backend.Settings.load()
+        self.assertTrue(loaded.any_identity)
+        self.assertEqual(loaded.identity, "Sampath")
 
     def test_autostart_cannot_be_changed_before_agent_task_exists(self) -> None:
         with (

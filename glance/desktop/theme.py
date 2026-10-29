@@ -123,6 +123,20 @@ QFrame#card, QFrame#settingsGroup {
     border: 1px solid $border;
     border-radius: 16px;
 }
+QFrame#identityCaptureCard {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $card_top, stop:1 $card_bottom);
+    border: 1px solid $border;
+    border-radius: 14px;
+}
+QLabel#identityName {
+    background: $surface;
+    color: $foreground;
+    border: 1px solid $border;
+    border-radius: 9px;
+    padding: 3px 10px;
+}
+QLabel#identityDetail { color: $muted; font-size: 10px; }
 QFrame#sidebar {
     background: $sidebar;
     border: none;

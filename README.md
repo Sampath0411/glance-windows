@@ -64,8 +64,8 @@ After installation:
 2. Let Glance download the face models (~16 MB) when it asks. They come from
    InsightFace's official release, are checksum-verified, and are stored in
    `%LOCALAPPDATA%\Glance\models` — the installer does not redistribute them.
-3. Enroll your face.
-4. Verify and save your Windows password.
+3. Verify and save your Windows password.
+4. Enroll your face.
 5. Turn on **Face unlock** for the Windows lock screen.
 
 The installer copies the credential provider and helper files but does **not** enable
@@ -74,7 +74,7 @@ approval when Glance needs administrator access.
 
 ## Your Windows account
 
-Step 4 needs the account name and password Windows itself asks for at the lock screen. The
+Password setup needs the account name and password Windows itself asks for at the lock screen. The
 name must match exactly: Glance hands the pair to Windows to verify before anything is
 stored, and a name that resolves to no user comes back as the same `rejected` message as a
 wrong password.
@@ -98,6 +98,18 @@ domain `MicrosoftAccount` with user `LAPTOP-1234\Alex`, which no account on the 
 
 A Windows Hello **PIN is not the password** and cannot be used here: it never leaves the Hello
 container. If the PC signs in with Hello only, the account first needs a real password.
+
+### Microsoft accounts: allow password sign-in
+
+On Microsoft-account PCs, open **Settings → Accounts → Sign-in options**. Under **Additional
+settings**, turn **Off** “For improved security, only allow Windows Hello sign-in for Microsoft
+accounts on this device (Recommended)”. When this switch is On, Windows restricts the account
+to Windows Hello sign-in; Glance's Windows credential provider needs the verified account
+password to complete sign-in. Turning this option Off allows the password-based provider to
+work. Keep a strong account password and your usual Windows Hello PIN available as sign-in
+options.
+
+![Windows Sign-in options with “Only allow Windows Hello sign-in for Microsoft accounts on this device” turned Off](assets/windows-hello-only-setting.png)
 
 ### If the password is unknown
 
@@ -146,28 +158,36 @@ reported as a missing `--account`, not as a password problem.
 
 ## How it works
 
-1. Launch the app and follow onboarding to enroll your face. Glance guides you through
-   capturing several samples, turning your head slightly between them. Each frame becomes a
+1. Launch the app and follow onboarding. Verify and save your Windows password first;
+   Glance needs it before it can enroll a face.
+2. Capture several samples, turning your head slightly between them. Each frame becomes a
    512-number *embedding* — a mathematical fingerprint — and the image is thrown away.
-2. Enter your Windows password once. Windows verifies it before Glance stores it.
-3. When Windows locks, the face agent starts the camera and looks for the selected identity.
-4. If it's you — and the liveness checks agree you're a real person — the agent writes a
-   short-lived, HMAC-signed grant bound to your account and logon session.
+3. When Windows locks, the face agent starts the camera and looks for an enrolled face —
+   any enrolled person, or one selected person.
+4. If the face is recognized — and the liveness checks agree you're a real person — the agent
+   writes a short-lived, HMAC-signed grant bound to your account and logon session.
 5. The Glance credential provider verifies that grant and submits the stored password.
    Windows' normal password and PIN providers remain available.
+
+Opening **Your Face** or **Password** in the app asks for a face check first, so those
+settings stay behind a recognized enrolled face. The pop-up never shows camera video and
+fails closed if the camera or face models are unavailable.
 
 ## Features
 
 | Feature | Description |
 |---|---|
 | **Face unlock** | Runs after Windows locks. The agent does nothing while the desktop is unlocked. |
-| **Multiple identities** | Enroll several people or several versions of yourself. Exactly one selected identity may authorize an unlock. |
+| **Multiple identities** | Enroll several people or several versions of yourself. Any enrolled face may authorize an unlock, or restrict it to one person in Recognition. |
+| **In-app face check** | Opening Your Face or Password first matches an enrolled face in a centered pop-up. Three stable matches are required; there is no camera preview. This app gate does not run liveness checks, so a photograph could pass it; the Windows lock-screen provider retains liveness checks. |
 | **Liveness checks** | Watches for glare and screen-shaped objects, with optional blink confirmation. *Light*, *Heavy*, or off. |
 | **Native Windows** | A real Win32 window: frameless glass shell, grouped sidebar, custom caption buttons, edge resize, snap, and maximise. |
 | **Glass interface** | A painted aurora backdrop under translucent panels, glass setting groups, and Windows-style window controls. |
 | **Six focused screens** | General, Your Face, Password, Camera, Recognition, and About. |
 | **Camera & recognition** | Choose the camera, match threshold, verification timeout, and autostart behavior. |
-| **Fail closed** | No selected identity, a missing credential, a stale grant, or any provider error falls back to the normal Windows password tile. |
+| **Guided enrollment** | Automatically collects and saves 18 quality-checked face samples, with gentle pose prompts and in-app capture feedback. |
+| **Idle auto-lock** | Optional keyboard/mouse inactivity lock, off by default, adjustable from 1 to 120 minutes (5 minutes by default). |
+| **Fail closed** | No enrolled faces, a missing credential, a stale grant, an unavailable camera or face model, or any provider error falls back to the normal Windows password tile. |
 | **Your data, your call** | Edit or delete your enrollment or stored password at any time. |
 | **Local by design** | Recognition and liveness run on-device. No face data, camera frames, or credentials are sent to a server. |
 
@@ -181,6 +201,16 @@ Glance is designed to keep biometric data and credentials on the device.
 
 Glance never stores camera images. During enrollment, each captured face is converted into a
 **512-dimensional embedding** using an ArcFace model. The original frame is then discarded.
+
+Enrollment starts only after you enter a name and choose **Start capture**. Glance guides you
+through straight-ahead, slight left/right, and slight up/down views; it accepts 18 clear,
+distinct samples and saves them automatically. The colored segments show sample coverage, not
+authentication confidence. Capture animation plays only in the app; it is not shown on the
+Windows lock screen.
+
+Optional **Auto-lock when idle** is in General settings. It is off by default and uses Windows
+keyboard/mouse inactivity while background protection is running. After an idle-triggered
+lock, a fresh key press or mouse movement is required before face verification starts.
 
 Embeddings are stored locally in `%LOCALAPPDATA%\Glance\data\identities.json` and protected
 by your Windows profile's file permissions. This build does **not** encrypt the embedding
@@ -202,7 +232,7 @@ a narrower ACL is future hardening work. Treat Glance as convenience software, n
 Glance won't submit your password simply because a face matches. An unlock requires all of
 the following:
 
-1. The selected identity is enrolled and enabled.
+1. An enrolled face is authorized — any enrolled person, or the selected person in single-person mode.
 2. The PC is actually locked.
 3. A face matches above the configured similarity threshold.
 4. Liveness checks accept the detected face.
