@@ -46,6 +46,64 @@ class PasswordHelperTests(unittest.TestCase):
         self.assertIn("helper", message.lower())
         run_elevated.assert_not_called()
 
+    def test_account_password_check_uses_stdin_not_command_line(self) -> None:
+        password = "secret-not-on-argv"
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "grant_tool.exe"
+            helper.write_bytes(b"test executable placeholder")
+            result = SimpleNamespace(returncode=0, stdout="verify=ok status=0x0", stderr="")
+            with (
+                patch.object(backend, "GRANT_TOOL", helper),
+                patch.object(backend.subprocess, "run", return_value=result) as run,
+            ):
+                ok, message = backend.check_account_password(
+                    r"MicrosoftAccount\alex@example.com", password
+                )
+
+        self.assertTrue(ok)
+        self.assertIn("accepted", message.lower())
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[1:], ["check", "--account", r"MicrosoftAccount\alex@example.com", "--password-stdin"])
+        self.assertNotIn(password, argv)
+        self.assertEqual(run.call_args.kwargs["input"], password)
+        self.assertEqual(run.call_args.kwargs["creationflags"], backend.CREATE_NO_WINDOW)
+
+    def test_account_password_check_translates_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "grant_tool.exe"
+            helper.write_bytes(b"test executable placeholder")
+            result = SimpleNamespace(
+                returncode=1, stdout="verify=rejected status=0xC000006A", stderr=""
+            )
+            with (
+                patch.object(backend, "GRANT_TOOL", helper),
+                patch.object(backend.subprocess, "run", return_value=result),
+            ):
+                ok, message = backend.check_account_password(r"PC\alex", "wrong")
+
+        self.assertFalse(ok)
+        self.assertIn("rejected", message.lower())
+
+    def test_manual_pause_is_persisted_until_wake(self) -> None:
+        with (
+            patch.object(backend.protection_state, "set_paused_until_wake", return_value=True) as mark,
+            patch.object(backend, "stop_agent", return_value=(True, "protection paused")) as stop,
+        ):
+            ok, message = backend.pause_agent_until_wake()
+        self.assertTrue(ok)
+        self.assertIn("wake", message.lower())
+        mark.assert_called_once_with(paused=True)
+        stop.assert_called_once_with()
+
+    def test_failed_pause_does_not_leave_pause_marker(self) -> None:
+        with (
+            patch.object(backend.protection_state, "set_paused_until_wake", return_value=True) as mark,
+            patch.object(backend, "stop_agent", return_value=(False, "denied")),
+        ):
+            ok, _message = backend.pause_agent_until_wake()
+        self.assertFalse(ok)
+        mark.assert_has_calls([unittest.mock.call(paused=True), unittest.mock.call(paused=False)])
+
     def test_password_is_always_verified_before_store(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             helper = Path(temp) / "grant_tool.exe"

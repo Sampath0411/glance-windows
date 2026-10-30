@@ -19,6 +19,7 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $here 'GlanceTasks.ps1')
 $repo = Split-Path -Parent $here
 $tool = Join-Path $here 'build\grant_tool.exe'
 $target = Join-Path $env:WINDIR 'System32\GlanceProvider.dll'
@@ -51,6 +52,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.ex
     }
 
 Write-Host "`n== removing the logon task" -ForegroundColor Cyan
+Remove-GlanceResumeTask
 schtasks /delete /tn 'Glance Agent' /f 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) { Write-Host '   removed task Glance Agent' -ForegroundColor Green }
 else { Write-Host '   no logon task present' }

@@ -37,6 +37,7 @@ import cv2  # noqa: E402
 
 from . import grant as grant_mod  # noqa: E402
 from .. import liveness as lv  # noqa: E402
+from .. import protection_state  # noqa: E402
 from ..core import MIN_FACE_FRACTION, GlancePipeline  # noqa: E402
 from ..paths import RuntimePaths, resolve_paths  # noqa: E402
 
@@ -47,9 +48,54 @@ kernel32 = ctypes.windll.kernel32
 wtsapi = ctypes.windll.wtsapi32
 
 WM_WTSSESSION_CHANGE = 0x02B1
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMEAUTOMATIC = 0x0012
 WTS_SESSION_LOCK = 0x7
 WTS_SESSION_UNLOCK = 0x8
 NOTIFY_FOR_THIS_SESSION = 0
+DESKTOP_READOBJECTS = 0x0001
+UOI_NAME = 2
+
+user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+user32.OpenInputDesktop.restype = wintypes.HANDLE
+user32.GetUserObjectInformationW.argtypes = [
+    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+]
+user32.GetUserObjectInformationW.restype = wintypes.BOOL
+user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+user32.CloseDesktop.restype = wintypes.BOOL
+
+
+def active_input_desktop_name() -> str | None:
+    """Return the active desktop name, or None when Windows cannot tell us."""
+    desktop = user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
+    if not desktop:
+        return None
+    try:
+        needed = wintypes.DWORD()
+        user32.GetUserObjectInformationW(
+            desktop, UOI_NAME, None, 0, ctypes.byref(needed)
+        )
+        if needed.value <= 0:
+            return None
+        buffer = ctypes.create_unicode_buffer(needed.value // ctypes.sizeof(ctypes.c_wchar) + 1)
+        if not user32.GetUserObjectInformationW(
+            desktop, UOI_NAME, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)
+        ):
+            return None
+        return buffer.value
+    finally:
+        user32.CloseDesktop(desktop)
+
+
+def is_locked_desktop_name(name: str | None) -> bool:
+    """Fail closed: only Windows' explicit Winlogon desktop counts as locked."""
+    return bool(name and name.casefold() == "winlogon")
+
+
+def is_session_locked() -> bool:
+    return is_locked_desktop_name(active_input_desktop_name())
 
 
 def resolve_runtime_paths(
@@ -177,13 +223,14 @@ def log(message: str) -> None:
 class Verifier:
     def __init__(self, threshold: float = 0.6, timeout: float = 90.0,
                  require_stable: int = 3, identity: str | None = None,
-                 any_identity: bool = False,
+                 any_identity: bool = False, liveness: str | lv.LivenessMode = "heavy",
                  paths: RuntimePaths | None = None) -> None:
         self.threshold = threshold
         self.timeout = timeout
         self.require_stable = require_stable
         self.identity = identity
         self.any_identity = any_identity
+        self.liveness = lv.LivenessMode.from_name(liveness)
         self.paths = paths or resolve_runtime_paths()
 
     def run(self, stop: threading.Event, is_locked=None) -> str:
@@ -209,13 +256,24 @@ class Verifier:
         # person is enrolled. A missing or stale selection must never implicitly
         # authorize everyone; anyone mode is an explicit setting.
 
-        evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.LIGHT)
+        evaluator = lv.LivenessEvaluator(mode=self.liveness)
         cap = pipeline.open_camera(0)
         if not cap.isOpened():
             return "error: camera did not open"
 
-        log(f"verifying (threshold {self.threshold:.2f}, timeout {self.timeout:.0f}s)")
+        log(f"verifying (threshold {self.threshold:.2f}, liveness {self.liveness.value}, "
+            f"timeout {self.timeout:.0f}s)")
         history: list[float] = []
+        openness_history: list[float] = []
+        motion_history: list = []
+        matched_face_seen = False
+
+        def reset_scan() -> None:
+            evaluator.reset()
+            history.clear()
+            openness_history.clear()
+            motion_history.clear()
+
         deadline = time.time() + self.timeout
         outcome = "no-face"
         try:
@@ -225,31 +283,28 @@ class Verifier:
                     outcome = "error: camera read failed"
                     break
 
-                embedding, face, _ = pipeline.embedding_for(frame)
+                embedding, face, aligned = pipeline.embedding_for(frame)
                 if embedding is None or face is None:
-                    evaluator.reset()
-                    history.clear()
+                    reset_scan()
                     continue
 
                 height, width = frame.shape[:2]
                 fraction = face.area / float(width * height)
                 if fraction < MIN_FACE_FRACTION:
-                    evaluator.reset()
-                    history.clear()
+                    reset_scan()
                     continue
 
                 match = pipeline.store.best_match(embedding, self.threshold)
                 if match is None:
-                    evaluator.reset()
-                    history.clear()
+                    reset_scan()
                     continue
 
                 identity, centroid, nearest = match
                 if not self.any_identity and identity.name != self.identity:
-                    evaluator.reset()
-                    history.clear()
+                    reset_scan()
                     continue
 
+                matched_face_seen = True
                 history.append(centroid)
                 del history[:-5]
 
@@ -259,7 +314,26 @@ class Verifier:
                 crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
                 glare = lv.extract_glare(crop)
                 device = lv.detect_device_rectangle(frame, tuple(face.bbox))
-                snapshot = evaluator.observe(lv.readings(glare, device, None))
+                screen = lv.extract_screen_glow(frame, tuple(face.bbox))
+                texture = lv.extract_texture(crop)
+
+                # Confirm cues read the running scan window.
+                landmarks = getattr(face, "kps", None)
+                interocular = lv.interocular_distance(landmarks)
+                ratios = lv.landmark_ratios(landmarks)
+                if ratios is not None:
+                    motion_history.append(ratios)
+                    del motion_history[:-12]
+                if aligned is not None:
+                    eye = lv.eye_openness(aligned, interocular)
+                    if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
+                        openness_history.append(eye.openness)
+                        del openness_history[:-12]
+
+                snapshot = evaluator.observe(lv.readings(
+                    glare, device, openness_history, screen, texture,
+                    motion_history, interocular,
+                ))
 
                 if snapshot.decision is lv.Decision.DENIED:
                     log(f"denied: {snapshot.denial_reason()}")
@@ -282,12 +356,22 @@ class Verifier:
                         outcome = f"error: {error}"
                         break
 
+                    confirmed_by = getattr(snapshot, "confirmed_by", None)
                     log(f"granted {identity.name} "
-                        f"(centroid {centroid:.3f}, nearest {nearest:.3f}) -> {path}")
+                        f"(centroid {centroid:.3f}, nearest {nearest:.3f}, "
+                        f"liveness {self.liveness.value}/{confirmed_by.title if confirmed_by else '?'}) "
+                        f"-> {path}")
                     outcome = "granted"
                     break
         finally:
             cap.release()
+
+        if outcome == "no-face" and matched_face_seen:
+            # A matching still photo reaches this point on every frame. Failing
+            # closed is the whole point; say so instead of reporting "no face".
+            log(f"denied: no proof of life ({self.liveness.value}) within {self.timeout:.0f}s - "
+                "a still photo cannot blink or move like a face")
+            outcome = "denied"
         return outcome
 
 
@@ -305,6 +389,31 @@ class SessionWatcher:
         self._idle_lock_input = None
         self._idle_attempt = -10.0
         self._last_idle_poll = 0.0
+        self._last_power_resume: float | None = None
+        config_path = getattr(getattr(verifier, "paths", None), "config_path", None)
+        self.protection_state_path = (
+            Path(config_path).parent / "protection_state.json"
+            if config_path else protection_state.STATE_PATH
+        )
+
+    def on_power_resume(self) -> None:
+        """Reopen recognition after wake; never leave a stale camera worker running."""
+        now = time.monotonic()
+        if self._last_power_resume is not None and now - self._last_power_resume < 3.0:
+            return
+        self._last_power_resume = now
+        protection_state.clear_pause_on_wake(self.protection_state_path)
+        self._stop_verification()
+        if self.locked:
+            log("system resumed while locked; restarting face verification")
+            self._start_verification()
+
+    def start_after_resume(self, is_locked: bool) -> None:
+        """A newly launched wake task scans only if Windows is still on Winlogon."""
+        if is_locked:
+            self.locked = True
+            log("agent started after wake while session is locked")
+            self._start_verification()
 
     def _check_idle(self):
         from .idle_lock import idle_seconds, input_ticks
@@ -361,10 +470,13 @@ class SessionWatcher:
             self.worker.join(timeout=5)
             self.worker = None
 
-    def run(self) -> int:
+    def run(self, resume_after_wake: bool = False) -> int:
         watcher = self
 
         def window_proc(hwnd, message, wparam, lparam):
+            if message == WM_POWERBROADCAST and wparam == PBT_APMRESUMEAUTOMATIC:
+                watcher.on_power_resume()
+                return 1
             if message == WM_WTSSESSION_CHANGE:
                 if wparam == WTS_SESSION_LOCK:
                     log("session locked")
@@ -402,6 +514,9 @@ class SessionWatcher:
         if not wtsapi.WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION):
             log(f"WTSRegisterSessionNotification failed: {kernel32.GetLastError()}")
             return 1
+
+        if resume_after_wake:
+            watcher.start_after_resume(is_session_locked())
 
         log("watching for session lock")
         message = MSG()
@@ -457,8 +572,12 @@ def main() -> int:
     parser.add_argument("--single-identity", dest="any_identity", action="store_false",
                         default=None,
                         help="restrict unlock to --identity")
+    parser.add_argument("--liveness", choices=("light", "heavy", "strict"), default=None,
+                        help="anti-spoof level (default: agent_config.json, else heavy)")
     parser.add_argument("--simulate", action="store_true",
                         help="run one verification pass immediately (no lock needed)")
+    parser.add_argument("--resume-after-wake", action="store_true",
+                        help="resume verification only if Windows is still on the lock screen")
     parser.add_argument("--self-test", action="store_true",
                         help="check key, SID, camera and enrolment, then exit")
     args = parser.parse_args()
@@ -467,6 +586,9 @@ def main() -> int:
     # without rewriting the scheduled task's command line. Explicit flags still win.
     paths = resolve_runtime_paths()
     config_path = paths.config_path
+    # Starting the agent at sign-in, through the UI, or from the wake task clears
+    # a temporary manual pause from the previous run/session.
+    protection_state.clear_pause_on_wake(config_path.parent / "protection_state.json")
     config: dict = {}
     if config_path.exists():
         try:
@@ -485,6 +607,9 @@ def main() -> int:
         args.threshold = float(config.get("threshold", 0.60))
     if args.timeout is None:
         args.timeout = float(config.get("timeout", 90.0))
+    if args.liveness is None:
+        args.liveness = str(config.get("liveness") or lv.DEFAULT_MODE.value)
+    args.liveness = lv.LivenessMode.from_name(args.liveness).value
     args.any_identity = resolve_any_identity(config, args.any_identity)
     args.identity = None if args.any_identity else resolve_identity(config, args.identity)
 
@@ -503,6 +628,7 @@ def main() -> int:
         pipeline = GlancePipeline(paths.identities_path, args.threshold)
         log(f"identities : {[i.name for i in pipeline.store.identities]}")
         log(f"scope      : {'any enrolled face' if args.any_identity else args.identity}")
+        log(f"liveness   : {args.liveness}")
         cap = pipeline.open_camera(0)
         if cap.isOpened():
             ok, frame = cap.read()
@@ -513,14 +639,18 @@ def main() -> int:
         return 0
 
     verifier = Verifier(args.threshold, args.timeout, identity=args.identity,
-                        any_identity=args.any_identity, paths=paths)
+                        any_identity=args.any_identity, liveness=args.liveness,
+                        paths=paths)
 
     if args.simulate:
         outcome = verifier.run(threading.Event())
         log(f"simulated verification: {outcome}")
         return 0 if outcome == "granted" else 1
 
-    return SessionWatcher(verifier).run()
+    watcher = SessionWatcher(verifier)
+    if args.resume_after_wake:
+        return watcher.run(resume_after_wake=True)
+    return watcher.run()
 
 
 if __name__ == "__main__":

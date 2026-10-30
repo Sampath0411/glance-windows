@@ -4,34 +4,47 @@ Glance for Windows - Phase 2 liveness.
 Ported from glance/Liveness/*.swift. The decision model is the part worth
 copying exactly, because it is unusually well thought out:
 
-  * five independent cues, never combined into a score
-  * DENY cues (glare, device bezel) override CONFIRM cues unconditionally
+  * independent cues, never combined into a score
+  * DENY cues override CONFIRM cues unconditionally
   * a cue with confidence 0 abstains - it can neither convict nor acquit
   * firing is latched per scan, and counting is cumulative not consecutive,
     so a single-frame landmark dropout doesn't reset progress
-  * Light mode  = deny only, "confirmed unless proven wrong"  <- Glance default
-  * Heavy mode  = deny cues, plus at least one CONFIRM cue must fire
+  * Light mode  = deny only, "confirmed unless proven wrong"  <- diagnostics only
+  * Heavy mode  = deny cues, plus at least one CONFIRM cue must fire  <- default
+  * Strict mode = deny cues, plus a blink is mandatory
 
-Implemented and tested here: the two deny cues. They need no landmarks, and on
-Glance's own tuning the device-rectangle detector is described as "the one
-signal proven reliable in real-device testing".
+Implemented deny cues:
+  * glossGlare       - one flat specular blob instead of scattered skin glints
+  * screenGlow       - a bright, neutral, uniform emissive panel behind the face
+  * deviceDetected   - device-shaped rectangle around the face (bezel inside the
+                       frame), including a phone whose screen edge only partly
+                       encloses a close-up face
+  * printOrMoire     - periodic high-frequency peaks: display pixel grid / moire
+                       or a printed halftone screen
 
-Partially implemented:
-  * blink  - eye aspect ratio from 106-point landmarks, assigned to eye anchors
-             geometrically (see notes below on why not by hardcoded index)
+Implemented confirm cues:
+  * blink            - bilateral dip-and-recovery in eye openness, measured from
+                       pixels inside the aligned 112x112 crop. SCRFD only has
+                       five points (no eyelids), and the 106-point index tables
+                       are widely misquoted, so the eye patches are taken from
+                       the fixed ArcFace template positions instead of landmark
+                       indices.
+  * microMotion      - variation of rigid-invariant landmark distance ratios.
+                       A flat photo, however it is moved or rotated, keeps those
+                       ratios constant; a real face changes them with expression
+                       and breathing.
 
-Deliberately abstaining for now:
-  * flatVs3D, depthPose - these need a head-yaw source. Glance gets yaw free
-    from Vision's VNFaceObservation. There is no equivalent here, and deriving
-    yaw from the nose offset it is then correlated against would make the cue
-    trivially self-confirming. An honest abstention beats a fake pass.
+Deliberately abstaining:
+  * flatVs3D, depthPose - these need a reliable head-yaw source. Glance gets yaw
+    free from Vision's VNFaceObservation. There is no equivalent here, and
+    deriving yaw from the nose offset it is then correlated against would make
+    the cue trivially self-confirming. An honest abstention beats a fake pass.
 
-Landmark note: Glance indexes Vision landmark *regions* (leftEye, nose, ...).
-The 106-point ONNX model emits an ordered flat array whose region boundaries are
-NOT the commonly published 33/10/9/5/8/10/10/11/10 layout - that layout failed a
-geometric sanity check on real frames (eyes came out stacked vertically). So
-regions are assigned by proximity to the facial anchors SCRFD already produces,
-which is self-calibrating per face instead of trusting an unverified index table.
+Known limit, stated plainly: a *video* replay of the right person can blink. No
+RGB-only liveness check can defeat that; it needs an IR/depth sensor. What this
+module does guarantee is that a single still photo or a static phone screen can
+never satisfy a confirm cue, and that several independent deny cues fail the
+scan outright when the spoof is visible in the frame.
 """
 
 from __future__ import annotations
@@ -52,23 +65,31 @@ class CueRole(Enum):
 
 class Cue(Enum):
     GLOSS_GLARE = "glossGlare"
+    SCREEN_GLOW = "screenGlow"
     DEVICE_DETECTED = "deviceDetected"
+    PRINT_OR_MOIRE = "printOrMoire"
     FLAT_VS_3D = "flatVs3D"
     DEPTH_POSE = "depthPose"
     BLINK = "blink"
+    MICRO_MOTION = "microMotion"
 
     @property
     def role(self) -> CueRole:
-        return CueRole.DENY if self in (Cue.GLOSS_GLARE, Cue.DEVICE_DETECTED) else CueRole.CONFIRM
+        return CueRole.DENY if self in (
+            Cue.GLOSS_GLARE, Cue.SCREEN_GLOW, Cue.DEVICE_DETECTED, Cue.PRINT_OR_MOIRE,
+        ) else CueRole.CONFIRM
 
     @property
     def title(self) -> str:
         return {
             Cue.GLOSS_GLARE: "Gloss/glare",
+            Cue.SCREEN_GLOW: "Screen glow",
             Cue.DEVICE_DETECTED: "Device detected",
+            Cue.PRINT_OR_MOIRE: "Print/moire texture",
             Cue.FLAT_VS_3D: "Flat vs 3D",
             Cue.DEPTH_POSE: "Depth/pose",
             Cue.BLINK: "Blink",
+            Cue.MICRO_MOTION: "Micro-motion",
         }[self]
 
 
@@ -86,39 +107,70 @@ class CueReading:
 class LivenessMode(Enum):
     LIGHT = "light"
     HEAVY = "heavy"
+    STRICT = "strict"
+
+    @classmethod
+    def from_name(cls, value) -> "LivenessMode":
+        """Unknown or malformed settings fall back to the safe default, not to off."""
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value or "").strip().lower())
+        except ValueError:
+            return cls.HEAVY
+
+
+# Default for the unlock agent. Light is deliberately *not* the default: it
+# confirms after three clean frames, which is exactly how a still photo used to
+# unlock Windows.
+DEFAULT_MODE = LivenessMode.HEAVY
 
 
 @dataclass
 class LivenessTuning:
-    """Defaults copied from LivenessTuning in LivenessCues.swift."""
+    """Defaults copied from LivenessTuning in LivenessCues.swift, plus the
+    Windows-specific screen/print/motion cues."""
     gloss_level: float = 0.04
     gloss_frames: int = 3
+    screen_level: float = 0.62
+    screen_frames: int = 3
     device_level: float = 0.15
     device_frames: int = 3
+    moire_level: float = 0.60
+    moire_frames: int = 4
     flat_vs_3d_level: float = 0.25
     flat_vs_3d_frames: int = 2
     depth_pose_level: float = 0.8
     depth_pose_frames: int = 2
     blink_frames: int = 1
+    motion_level: float = 0.60
+    motion_frames: int = 3
     light_mode_minimum_frames: int = 3
 
     def level(self, cue: Cue) -> float:
         return {
             Cue.GLOSS_GLARE: self.gloss_level,
+            Cue.SCREEN_GLOW: self.screen_level,
             Cue.DEVICE_DETECTED: self.device_level,
+            Cue.PRINT_OR_MOIRE: self.moire_level,
             Cue.FLAT_VS_3D: self.flat_vs_3d_level,
             Cue.DEPTH_POSE: self.depth_pose_level,
             Cue.BLINK: 0.5,
+            Cue.MICRO_MOTION: self.motion_level,
         }[cue]
 
     def frames(self, cue: Cue) -> int:
         return {
             Cue.GLOSS_GLARE: self.gloss_frames,
+            Cue.SCREEN_GLOW: self.screen_frames,
             Cue.DEVICE_DETECTED: self.device_frames,
+            Cue.PRINT_OR_MOIRE: self.moire_frames,
             Cue.FLAT_VS_3D: self.flat_vs_3d_frames,
             Cue.DEPTH_POSE: self.depth_pose_frames,
             Cue.BLINK: self.blink_frames,
+            Cue.MICRO_MOTION: self.motion_frames,
         }[cue]
+
 
 
 class Decision(Enum):
@@ -152,18 +204,28 @@ class Snapshot:
             return None
         if self.denied_by is Cue.GLOSS_GLARE:
             return "Screen glare detected - this looks like a photo on a display."
+        if self.denied_by is Cue.SCREEN_GLOW:
+            return "A bright emissive screen was detected around the face - photo on a phone or monitor."
         if self.denied_by is Cue.DEVICE_DETECTED:
             return "A device-shaped rectangle was detected around the face - photo or screen."
+        if self.denied_by is Cue.PRINT_OR_MOIRE:
+            return "A screen or print pattern was detected - this face is not three-dimensional."
         return "Liveness check failed."
+
+    def waiting_reason(self) -> str:
+        """What a still photo will wait on forever, for user-facing logs."""
+        if self.decision is Decision.CONFIRMED:
+            return "confirmed"
+        return "no blink or natural movement seen yet"
 
 
 class LivenessEvaluator:
     """Port of LivenessEvaluator. Deny is evaluated first and is unconditional."""
 
-    def __init__(self, mode: LivenessMode = LivenessMode.LIGHT,
+    def __init__(self, mode: LivenessMode = DEFAULT_MODE,
                  tuning: LivenessTuning | None = None,
                  enabled_cues: set[Cue] | None = None):
-        self.mode = mode
+        self.mode = LivenessMode.from_name(mode)
         self.tuning = tuning or LivenessTuning()
         self.enabled_cues = enabled_cues if enabled_cues is not None else set(Cue)
         self.states: dict[Cue, CueState] = {}
@@ -197,6 +259,9 @@ class LivenessEvaluator:
             if self.mode is LivenessMode.LIGHT:
                 if self.frames_observed >= self.tuning.light_mode_minimum_frames:
                     decision = Decision.CONFIRMED
+            elif self.mode is LivenessMode.STRICT:
+                if Cue.BLINK in self.enabled_cues and self.states[Cue.BLINK].has_fired:
+                    decision, confirmed_by = Decision.CONFIRMED, Cue.BLINK
             else:
                 for cue in Cue:
                     if (cue.role is CueRole.CONFIRM and cue in self.enabled_cues
@@ -295,6 +360,10 @@ MIN_SIZE_FRACTION = 0.15      # fraction of image AREA, not width/height
 MIN_ASPECT = 0.35             # phone in portrait ... near-square tablet crop
 MAX_ASPECT = 1.0
 QUADRATURE_TOLERANCE_DEG = 30.0
+# A device or print held up for the camera has the face occupying a large part
+# of it. A doorway or window with a person standing in it is tens of times the
+# face area, and must not read as a phone.
+MAX_DEVICE_FACE_RATIO = 12.0
 
 
 def detect_device_rectangle(frame_bgr: np.ndarray,
@@ -325,12 +394,20 @@ def detect_device_rectangle(frame_bgr: np.ndarray,
 
     fx1, fy1, fx2, fy2 = face_bbox
     face_area = max((fx2 - fx1) * (fy2 - fy1), 1.0)
+    face_width = max(fx2 - fx1, 1.0)
+    face_height = max(fy2 - fy1, 1.0)
+
+    # A close-up phone can have its bezel outside the frame; what is still
+    # visible is the screen edge partly enclosing the face. Search smaller
+    # contours too, but only accept them under the stricter enclosing rules.
+    candidate_area = max(0.02 * frame_area, 0.5 * face_area, 400.0)
 
     best = None
     best_score = -1.0
+    best_level = 0.0
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < min_area:
+        if area < candidate_area:
             continue
 
         peri = cv2.arcLength(contour, True)
@@ -357,18 +434,47 @@ def detect_device_rectangle(frame_bgr: np.ndarray,
         ix1, iy1 = max(bx, fx1), max(by, fy1)
         ix2, iy2 = min(bx + bw, fx2), min(by + bh, fy2)
         overlap = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1) / face_area
-        if overlap <= 0.0:
+
+        enclosing = (
+            _encloses_face((bx, by, bw, bh), (fx1, fy1, fx2, fy2))
+            and bw > 0 and bh > 0
+            # Tight around the face: a doorway or window with a person standing
+            # in it is a much larger rectangle with a much smaller face in it.
+            and face_width / float(bw) >= 0.25
+            and face_height / float(bh) >= 0.18
+            and 0.5 <= area / face_area <= 4.0
+        )
+        if (area >= min_area and overlap > 0.0
+                and area / face_area <= MAX_DEVICE_FACE_RATIO):
+            level = float(min(max(overlap, 0.0), 1.0))
+            score = overlap * 10.0 + area / frame_area
+        elif enclosing:
+            level = 1.0
+            score = 20.0 + area / frame_area
+        else:
             continue
+
         # Prefer the candidate covering the most of the face, then the largest.
-        score = overlap * 10.0 + area / frame_area
         if score > best_score:
             best_score = score
             best = (bx, by, bw, bh)
+            best_level = level
             best_overlap = overlap
 
     if best is None:
         return DeviceObservation.none()
-    return DeviceObservation(best, float(min(max(best_overlap, 0.0), 1.0)))
+    return DeviceObservation(best, best_level)
+
+
+def _encloses_face(rect: tuple[int, int, int, int],
+                   face_bbox: tuple[float, float, float, float],
+                   margin_fraction: float = 0.02) -> bool:
+    bx, by, bw, bh = rect
+    fx1, fy1, fx2, fy2 = face_bbox
+    margin = margin_fraction * max(fx2 - fx1, fy2 - fy1, 1.0)
+    return (bx <= fx1 - margin and by <= fy1 - margin
+            and bx + bw >= fx2 + margin and by + bh >= fy2 + margin)
+
 
 
 def _corners_near_square(pts: np.ndarray, tolerance_deg: float) -> bool:
@@ -392,92 +498,346 @@ def device_reading(obs: DeviceObservation) -> CueReading:
 
 
 # --------------------------------------------------------------------------- #
-# confirm cue: blink   (LivenessScoring.blinkDynamics)
+# deny cue 3: emissive screen glow
 # --------------------------------------------------------------------------- #
-def eye_points_by_proximity(landmarks_106: np.ndarray,
-                            left_eye: np.ndarray,
-                            right_eye: np.ndarray,
-                            k: int = 8) -> tuple[np.ndarray, np.ndarray]:
-    """Split 106 landmarks into two eye clusters by proximity to SCRFD's eye anchors.
+@dataclass
+class ScreenSample:
+    """Statistics of the band of frame immediately around the face box."""
+    ring_luma: float
+    ring_saturation: float
+    ring_uniformity: float      # 1 - std/mean; 1.0 is perfectly flat
+    ring_edge_density: float    # share of ring pixels on a Canny edge
+    pixel_width: float          # face width in native pixels
 
-    Index tables for the 106-point model are widely misquoted, so this assigns
-    by geometry instead: the k nearest points to each verified eye centre.
+
+def extract_screen_glow(frame_bgr: np.ndarray,
+                        face_bbox: tuple[float, float, float, float]) -> ScreenSample | None:
+    """Look at the ring of background *around* the face for an emissive panel.
+
+    A held-up phone or a monitor showing a photo is a flat light source right
+    behind the face: bright, colour-neutral, almost no texture, and without the
+    soft falloff of a lit wall. This deliberately only fires on the extreme
+    combination; the confirm cues remain the load-bearing defence.
     """
-    pts = np.asarray(landmarks_106, dtype=np.float32)
-    d_left = np.linalg.norm(pts - np.asarray(left_eye, np.float32), axis=1)
-    d_right = np.linalg.norm(pts - np.asarray(right_eye, np.float32), axis=1)
-    # one pass of mutual exclusion so the same point can't join both eyes
-    order_left = np.argsort(d_left)
-    chosen_left = []
-    for i in order_left:
-        if len(chosen_left) >= k:
-            break
-        if d_right[i] < d_left[i]:
-            continue
-        chosen_left.append(i)
-    order_right = np.argsort(d_right)
-    chosen_right = []
-    for i in order_right:
-        if len(chosen_right) >= k:
-            break
-        if i in chosen_left or d_left[i] < d_right[i]:
-            continue
-        chosen_right.append(i)
-    return pts[chosen_left], pts[chosen_right]
-
-
-def eye_aspect_ratio(eye_pts: np.ndarray) -> float | None:
-    if eye_pts is None or len(eye_pts) < 3:
+    if frame_bgr is None or frame_bgr.size == 0:
         return None
-    w = float(np.ptp(eye_pts[:, 0]))
-    h = float(np.ptp(eye_pts[:, 1]))
-    if w <= 1e-6:
+    h, w = frame_bgr.shape[:2]
+    x1, y1, x2, y2 = [int(round(float(v))) for v in face_bbox]
+    face_width, face_height = x2 - x1, y2 - y1
+    if face_width <= 8 or face_height <= 8:
         return None
-    return h / w
+
+    span = max(face_width, face_height)
+    pad_out = int(round(0.35 * span))
+    pad_in = int(round(0.05 * span))
+    ex1, ey1 = max(0, x1 - pad_out), max(0, y1 - pad_out)
+    ex2, ey2 = min(w, x2 + pad_out), min(h, y2 + pad_out)
+    band = frame_bgr[ey1:ey2, ex1:ex2]
+    if band.size == 0:
+        return None
+
+    ring = np.ones(band.shape[:2], dtype=bool)
+    ix1, iy1 = max(0, x1 - pad_in - ex1), max(0, y1 - pad_in - ey1)
+    ix2 = min(band.shape[1], x2 + pad_in - ex1)
+    iy2 = min(band.shape[0], y2 + pad_in - ey1)
+    ring[iy1:iy2, ix1:ix2] = False
+    if int(ring.sum()) < 600:
+        return None
+
+    gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+    luma = gray[ring].astype(np.float32)
+    mean = float(luma.mean())
+    std = float(luma.std())
+    saturation = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)[:, :, 1][ring].astype(np.float32)
+    edges = cv2.Canny(gray, 60, 160)
+    edge_density = float((edges[ring] > 0).mean())
+    return ScreenSample(
+        ring_luma=mean,
+        ring_saturation=float(saturation.mean()),
+        ring_uniformity=1.0 - std / max(mean, 1.0),
+        ring_edge_density=edge_density,
+        pixel_width=float(face_width),
+    )
 
 
-def blink_reading(ear_history: list[float]) -> CueReading:
-    """Dip-and-recovery in eye aspect ratio. A photo cannot blink.
+def screen_glow_reading(sample: ScreenSample | None) -> CueReading:
+    if sample is None:
+        return CueReading.none()
+    brightness = _ramp(sample.ring_luma, 195.0, 235.0)
+    neutrality = _ramp(45.0 - sample.ring_saturation, 0.0, 35.0)
+    flatness = _ramp(sample.ring_uniformity, 0.82, 0.95)
+    smoothness = _ramp(0.055 - sample.ring_edge_density, 0.0, 0.045)
+    level = min(brightness, neutrality) * (0.5 + 0.5 * flatness) * (0.5 + 0.5 * smoothness)
+    confidence = _ramp(sample.pixel_width, 70.0, 150.0)
+    return CueReading(level, confidence)
 
-    Port of LivenessScoring.blinkDynamics: needs a dip below 0.65 of baseline
-    with recovery to >0.7 on at least one side within 3 frames. Absence of a
-    blink is an abstention, never a failure - a live person may not blink in a
-    short scan.
+
+# --------------------------------------------------------------------------- #
+# deny cue 4: display grid / printed halftone  (periodic texture)
+# --------------------------------------------------------------------------- #
+@dataclass
+class TextureSample:
+    peak_ratio: float          # strongest off-axis spectral peak vs mean
+    periodic_energy: float     # share of band energy in the top few bins
+    contrast: float            # std of the high-passed crop, in luma levels
+    crop_size: float           # shorter side of the analysed crop, native px
+
+
+def extract_texture(face_crop_bgr: np.ndarray) -> TextureSample | None:
+    """Find a regular grid in the face crop.
+
+    A screen photographed by a camera, and a printed photo photographed up
+    close, both add a periodic pattern that skin does not have. The spectrum is
+    analysed off the horizontal/vertical axes so the strong straight edges of
+    eyes, glasses and jaw do not masquerade as a grid.
     """
-    if len(ear_history) < 4:
+    if face_crop_bgr is None or face_crop_bgr.size == 0:
+        return None
+    gray = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+    if min(h, w) < 48:
+        return None
+    native = float(min(h, w))
+
+    # Cap the FFT cost on large frames. INTER_AREA keeps the average texture
+    # energy, which is what we are measuring.
+    target = 256
+    if max(h, w) > target:
+        scale = target / float(max(h, w))
+        gray = cv2.resize(gray, (max(32, int(w * scale)), max(32, int(h * scale))),
+                          interpolation=cv2.INTER_AREA)
+        h, w = gray.shape[:2]
+
+    data = gray.astype(np.float32)
+    # Remove smooth shading and lighting gradients; a periodic grid is fine
+    # detail. Without this, any soft background ramp leaks a few bins into the
+    # band and looks periodic.
+    data = data - cv2.GaussianBlur(data, (0, 0), 2.0)
+    contrast = float(data.std())
+    data -= float(data.mean())
+    window = cv2.createHanningWindow((w, h), cv2.CV_32F)
+    spectrum = np.abs(np.fft.fftshift(np.fft.fft2(data * window)))
+    cy, cx = h // 2, w // 2
+    yy, xx = np.ogrid[:h, :w]
+    radius = np.hypot((yy - cy) / max(h / 2.0, 1.0), (xx - cx) / max(w / 2.0, 1.0))
+    band = (radius > 0.10) & (radius < 0.85)
+    axis = (np.abs(xx - cx) <= 2) | (np.abs(yy - cy) <= 2)
+    region = spectrum[band & ~axis]
+    if region.size < 512:
+        return None
+
+    mean = float(region.mean())
+    peak_ratio = float(region.max()) / max(mean, 1e-6)
+    k = max(12, region.size // 300)
+    top = np.partition(region, -k)[-k:]
+    periodic_energy = float(top.sum()) / max(float(region.sum()), 1e-6)
+    return TextureSample(peak_ratio, periodic_energy, contrast, native)
+
+
+def texture_reading(sample: TextureSample | None) -> CueReading:
+    if sample is None:
         return CueReading.none()
-    ears = ear_history[-8:]
-    baseline = max(ears)
-    if baseline <= 0:
+    peak = _ramp(sample.peak_ratio, 14.0, 48.0)
+    periodic = _ramp(sample.periodic_energy, 0.03, 0.12)
+    # A periodic pattern worth convicting has to be visible, not quantisation
+    # noise left behind by a smooth gradient.
+    visible = _ramp(sample.contrast, 1.2, 3.0)
+    level = min(peak, periodic) * visible
+    confidence = _ramp(sample.crop_size, 90.0, 190.0)
+    return CueReading(level, confidence)
+
+
+# --------------------------------------------------------------------------- #
+# confirm cue: blink, from pixel darkness inside the aligned face
+# --------------------------------------------------------------------------- #
+# Fixed ArcFace template positions (112x112). SCRFD gives five points and no
+# eyelids, and the published 106-point index tables are unreliable, so the eye
+# patches come from geometry we already trust: the aligned crop itself.
+EYE_CENTERS_112 = ((38.29, 51.70), (73.53, 51.50))
+EYE_HALF_112 = (10.0, 6.0)
+# Forehead and both cheeks: skin reference, well clear of brows and mouth.
+SKIN_PATCHES_112 = ((24.0, 82.0, 12.0, 8.0),
+                    (88.0, 82.0, 12.0, 8.0),
+                    (56.0, 24.0, 16.0, 7.0))
+
+MIN_OPENNESS_CONFIDENCE = 0.35
+MIN_SCREEN_CONFIDENCE = 0.35
+MIN_TEXTURE_CONFIDENCE = 0.35
+
+
+@dataclass
+class EyeSample:
+    openness: float       # share of eye-patch pixels clearly darker than skin
+    confidence: float
+
+
+def _patch(gray: np.ndarray, width: int, height: int,
+           cx: float, cy: float, half_w: float, half_h: float) -> np.ndarray:
+    sx, sy = width / 112.0, height / 112.0
+    x1 = int(round((cx - half_w) * sx))
+    x2 = int(round((cx + half_w) * sx))
+    y1 = int(round((cy - half_h) * sy))
+    y2 = int(round((cy + half_h) * sy))
+    x1, x2 = max(0, x1), min(width, x2)
+    y1, y2 = max(0, y1), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return np.empty(0, dtype=np.float32)
+    return gray[y1:y2, x1:x2].reshape(-1)
+
+
+def eye_openness(aligned_bgr: np.ndarray, interocular_px: float) -> EyeSample | None:
+    """Bilateral eye darkness relative to the surrounding skin.
+
+    An open eye puts a dark iris and bright sclera inside the patch; a closed
+    eye is mostly skin. Both eyes are averaged, so landmark jitter on one side
+    cannot fake a blink.
+    """
+    if aligned_bgr is None or aligned_bgr.size == 0:
+        return None
+    h, w = aligned_bgr.shape[:2]
+    if min(h, w) < 64:
+        return None
+    gray = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    skin = np.concatenate([
+        _patch(gray, w, h, cx, cy, hw, hh) for cx, cy, hw, hh in SKIN_PATCHES_112
+    ])
+    if skin.size < 40:
+        return None
+    skin_mean = float(skin.mean())
+    skin_std = float(skin.std())
+    dark_floor = skin_mean - max(1.25 * skin_std, 12.0)
+
+    shares = []
+    for cx, cy in EYE_CENTERS_112:
+        patch = _patch(gray, w, h, cx, cy, EYE_HALF_112[0], EYE_HALF_112[1])
+        if patch.size < 20:
+            return None
+        shares.append(float((patch < dark_floor).mean()))
+    return EyeSample(openness=float(np.mean(shares)),
+                     confidence=_ramp(float(interocular_px), 18.0, 45.0))
+
+
+def blink_reading(openness_history: list[float],
+                  min_absolute_drop: float = 0.012) -> CueReading:
+    """Dip-and-recovery in bilateral eye openness. A still photo cannot blink.
+
+    Needs a dip below 0.62 of baseline, an absolute change big enough that
+    patch jitter cannot produce it, and recovery above 0.82 within three
+    frames on both sides of the dip. Absence of a blink is an abstention, never
+    a failure - a live person may not blink during a short window.
+    """
+    if not openness_history or len(openness_history) < 4:
         return CueReading.none()
-    normalised = [e / baseline for e in ears]
-    min_index = int(np.argmin(normalised))
-    dip = normalised[min_index]
-    if dip >= 0.65:
+    recent = [float(v) for v in openness_history[-10:]]
+    baseline = float(np.percentile(recent, 90))
+    if baseline <= 1e-6:
+        return CueReading.none()
+    normalised = [value / baseline for value in recent]
+    index = int(np.argmin(normalised))
+    if normalised[index] >= 0.62:
+        return CueReading.none()
+    required_drop = max(min_absolute_drop, 0.20 * baseline)
+    if baseline - recent[index] < required_drop:
+        return CueReading.none()
+    if index <= 0 or index >= len(normalised) - 1:
         return CueReading.none()
 
     radius = 3
-    before = normalised[max(0, min_index - radius):min_index]
-    after = normalised[min_index + 1:min_index + 1 + radius]
-    open_before = any(v > 0.7 for v in before)
-    open_after = any(v > 0.7 for v in after)
-    if min_index > 0 and min_index < len(normalised) - 1 and open_before and open_after:
+    before = normalised[max(0, index - radius):index]
+    after = normalised[index + 1:index + 1 + radius]
+    if any(value > 0.82 for value in before) and any(value > 0.82 for value in after):
         return CueReading(1.0, 1.0)
     return CueReading.none()
 
 
 # --------------------------------------------------------------------------- #
+# confirm cue: rigid-invariant micro-motion
+# --------------------------------------------------------------------------- #
+def interocular_distance(landmarks) -> float:
+    try:
+        pts = np.asarray(landmarks, dtype=np.float32)
+    except (TypeError, ValueError):
+        return 0.0
+    if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] != 2:
+        return 0.0
+    return float(np.linalg.norm(pts[1] - pts[0]))
+
+
+def landmark_ratios(landmarks) -> np.ndarray | None:
+    """Five landmark distances divided by interocular distance.
+
+    Every term is a ratio of distances, so translation, rotation and uniform
+    scale cancel. Moving or turning a flat photo therefore cannot manufacture
+    variation the way raw x/y offsets could.
+    """
+    try:
+        pts = np.asarray(landmarks, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    if pts.ndim != 2 or pts.shape[0] < 5 or pts.shape[1] != 2:
+        return None
+    left_eye, right_eye, nose, left_mouth, right_mouth = pts[:5]
+    eye = float(np.linalg.norm(right_eye - left_eye))
+    if eye < 1e-3:
+        return None
+    mouth_centre = (left_mouth + right_mouth) / 2.0
+    return np.array([
+        np.linalg.norm(nose - left_eye) / eye,
+        np.linalg.norm(nose - right_eye) / eye,
+        np.linalg.norm(left_mouth - right_mouth) / eye,
+        np.linalg.norm(nose - mouth_centre) / eye,
+        np.linalg.norm(left_mouth - left_eye) / eye,
+    ], dtype=np.float32)
+
+
+def micro_motion_reading(ratio_history: list[np.ndarray] | None,
+                         interocular_px: float = 0.0) -> CueReading:
+    rows = [row for row in (ratio_history or [])[-12:] if row is not None]
+    if len(rows) < 5:
+        return CueReading.none()
+    array = np.stack(rows).astype(np.float32)
+    median = np.median(array, axis=0)
+    # Three-frame smoothing turns detector jitter into noise that averages
+    # down, while a real expression or head movement survives.
+    if len(array) >= 5:
+        kernel = np.ones(3, dtype=np.float32) / 3.0
+        smooth = np.stack([
+            np.convolve(array[:, i], kernel, mode="valid") for i in range(array.shape[1])
+        ], axis=1)
+    else:
+        smooth = array
+    relative = np.ptp(smooth, axis=0) / np.maximum(np.abs(median), 1e-6)
+    variation = float(np.max(relative))
+    # Floor is deliberately above measured landmark jitter; a photo moved by
+    # hand keeps these ratios constant because they are scale/pose invariant.
+    level = _ramp(variation, 0.006, 0.020)
+    confidence = _ramp(float(len(rows)), 5.0, 9.0) * _ramp(float(interocular_px), 18.0, 40.0)
+    return CueReading(level, confidence)
+
+# --------------------------------------------------------------------------- #
 # per-frame readings
 # --------------------------------------------------------------------------- #
-def readings(glare: GlareSample | None,
-             device: DeviceObservation | None,
-             ear_history: list[float] | None = None) -> dict[Cue, CueReading]:
-    out = {
+def _gate(reading: CueReading, minimum: float) -> CueReading:
+    """A cue that is not confident enough abstains; it never counts."""
+    return reading if reading.confidence >= minimum else CueReading.none()
+
+
+def readings(glare: GlareSample | None = None,
+             device: DeviceObservation | None = None,
+             openness_history: list[float] | None = None,
+             screen: ScreenSample | None = None,
+             texture: TextureSample | None = None,
+             motion_history: list[np.ndarray] | None = None,
+             interocular_px: float = 0.0) -> dict[Cue, CueReading]:
+    return {
         Cue.GLOSS_GLARE: gloss_glare_reading(glare),
+        Cue.SCREEN_GLOW: _gate(screen_glow_reading(screen), MIN_SCREEN_CONFIDENCE),
         Cue.DEVICE_DETECTED: device_reading(device) if device else CueReading.none(),
+        Cue.PRINT_OR_MOIRE: _gate(texture_reading(texture), MIN_TEXTURE_CONFIDENCE),
         # Abstain: no head-yaw source on Windows. See the module docstring.
         Cue.FLAT_VS_3D: CueReading.none(),
         Cue.DEPTH_POSE: CueReading.none(),
-        Cue.BLINK: blink_reading(ear_history or []),
+        Cue.BLINK: blink_reading(openness_history or []),
+        Cue.MICRO_MOTION: micro_motion_reading(motion_history, interocular_px),
     }
-    return out

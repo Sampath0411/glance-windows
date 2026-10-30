@@ -832,7 +832,12 @@ class FaceGateTests(unittest.TestCase):
     def test_a_low_score_or_a_different_face_breaks_the_streak(self) -> None:
         camera = self.FakeCamera()
         dialog, _events, _parent = self.make_dialog(camera, threshold=0.70)
-        self.show_dialog(dialog, timeout=0.2)
+        # A scan window long enough that it cannot expire while the dialog is
+        # starting up: the assertions below are about streak bookkeeping, not
+        # the timer. A short window made this test fail intermittently, because
+        # on a loaded machine the timeout fired before the gate signals were
+        # delivered and a finished scan ignores them.
+        self.show_dialog(dialog, timeout=600.0)
         camera.gate.emit("Sampath", 0.91, "")
         camera.gate.emit("Sampath", 0.91, "")
         self.assertEqual(dialog.streak(), 2)
@@ -842,6 +847,8 @@ class FaceGateTests(unittest.TestCase):
         self.assertEqual(dialog.streak(), 0)
         camera.gate.emit("Anu", 0.95, "")
         camera.gate.emit("Anu", 0.95, "")
+        # Force the remaining scan window to expire and check the timeout path.
+        dialog._scan_timer.start(20)
         QTest.qWait(300)
         self.assertFalse(dialog.is_scanning())
         self.assertEqual(dialog.matched_name, "")
@@ -1025,10 +1032,87 @@ class StartupModelsTests(unittest.TestCase):
 
         with patch.object(ModelsDialog, "ensure_models", side_effect=offer_models), \
                 patch.object(MainWindow, "show_first_run_if_needed",
-                             side_effect=lambda: order.append("onboarding")):
+                             side_effect=lambda: order.append("onboarding")), \
+                patch.object(MainWindow, "show_whats_new_if_needed",
+                             side_effect=lambda: order.append("whats-new")), \
+                patch.object(MainWindow, "offer_startup_if_needed",
+                             side_effect=lambda: order.append("startup")):
             window.startup_sequence()
 
-        self.assertEqual(order, ["models", "onboarding"])
+        self.assertEqual(order, ["models", "onboarding", "whats-new", "startup"])
+
+    def test_whats_new_is_marked_after_being_shown(self) -> None:
+        window = MainWindow()
+        with (
+            patch("glance.desktop.main.ui_state.should_show_whats_new", return_value=True),
+            patch("glance.desktop.main.QMessageBox.information") as information,
+            patch("glance.desktop.main.ui_state.mark_whats_new_shown") as mark,
+        ):
+            window.show_whats_new_if_needed()
+        information.assert_called_once()
+        mark.assert_called_once_with(desktop_main.__version__)
+        window.close()
+
+    def test_dashboard_distinguishes_manual_pause_from_unexpected_agent_exit(self) -> None:
+        window = MainWindow()
+        common = {
+            "task": {"present": True, "enabled": False},
+            "running": False,
+            "credential": {"present": True, "account": "PC\\alex"},
+            "identities": [{"name": "Alex", "samples": 8}],
+            "unlock": "never",
+        }
+        window.dashboard._apply_snapshot({**common, "paused_until_wake": True})
+        self.assertEqual(window.dashboard.status_title.text(), "Paused until wake")
+
+        window.dashboard._apply_snapshot({**common, "paused_until_wake": False})
+        self.assertEqual(window.dashboard.status_title.text(), "Protection stopped")
+        self.assertIn("unexpectedly", window.dashboard.status_detail.text().lower())
+        window.close()
+
+    def test_startup_prompt_later_is_saved_and_not_repeated(self) -> None:
+        window = MainWindow()
+
+        class FakeMessageBox:
+            AcceptRole = 0
+            RejectRole = 1
+            Information = 2
+
+            def __init__(self, *_args):
+                self.buttons = []
+                self.choice = None
+
+            def setWindowTitle(self, _title):
+                pass
+
+            def setText(self, _text):
+                pass
+
+            def addButton(self, text, role):
+                button = (text, role)
+                self.buttons.append(button)
+                if text == "Later":
+                    self.choice = button
+                return button
+
+            def exec(self):
+                pass
+
+            def clickedButton(self):
+                return self.choice
+
+        with (
+            patch("glance.desktop.main.backend.task_state", return_value={"present": True, "enabled": False}),
+            patch("glance.desktop.main.ui_state.should_offer_startup_prompt", return_value=True),
+            patch("glance.desktop.main.ui_state.dismiss_startup_prompt") as dismiss,
+            patch("glance.desktop.main.QMessageBox", FakeMessageBox),
+            patch("glance.desktop.main.backend.set_autostart") as set_autostart,
+        ):
+            window.offer_startup_if_needed()
+
+        dismiss.assert_called_once_with()
+        set_autostart.assert_not_called()
+        window.close()
 
     def test_ensure_models_is_silent_when_the_models_are_installed(self) -> None:
         with patch.object(backend, "models_ready", return_value=True), \

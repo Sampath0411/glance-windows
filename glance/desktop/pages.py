@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
@@ -120,6 +121,7 @@ class DashboardSnapshotTask(QThread):
             snapshot = {
                 "task": backend.task_state(),
                 "running": backend.agent_running(),
+                "paused_until_wake": backend.protection_state.is_paused_until_wake(),
                 "credential": backend.credential_status(),
                 "identities": backend.identity_summary(),
                 "unlock": backend.last_unlock(),
@@ -173,6 +175,7 @@ class Dashboard(QWidget):
         status_layout.addLayout(text_column, 1)
 
         self.pause_button = QPushButton("Pause protection")
+        self.pause_button.setToolTip("Protection resumes when this PC wakes from sleep.")
         self.pause_button.clicked.connect(self.toggle_pause)
         status_layout.addWidget(self.pause_button, 0, Qt.AlignTop)
         layout.addWidget(status)
@@ -313,6 +316,7 @@ class Dashboard(QWidget):
         settings = self.window.settings
         state = snapshot["task"]
         running = snapshot["running"]
+        paused_until_wake = snapshot.get("paused_until_wake", False)
         self._agent_installed = bool(state.get("present"))
         self.autostart.blockSignals(True)
         self.autostart.setChecked(bool(state.get("enabled")))
@@ -338,8 +342,16 @@ class Dashboard(QWidget):
             self.pause_button.setEnabled(True)
         else:
             self.status_dot.set_color(WARN)
-            self.status_title.setText("Paused")
-            self.status_detail.setText("Locks will need your PIN or password.")
+            if paused_until_wake:
+                self.status_title.setText("Paused until wake")
+                self.status_detail.setText(
+                    "Protection resumes when this PC wakes. Locks will need your PIN or password until then."
+                )
+            else:
+                self.status_title.setText("Protection stopped")
+                self.status_detail.setText(
+                    "Protection stopped unexpectedly. Select Resume protection to try again."
+                )
             self.pause_button.setText("Resume protection")
             self.pause_button.setEnabled(True)
 
@@ -390,7 +402,7 @@ class Dashboard(QWidget):
         if self._pause_task is not None:
             return
         self.pause_button.setEnabled(False)
-        operation = backend.stop_agent if backend.agent_running() else backend.start_agent
+        operation = backend.pause_agent_until_wake if backend.agent_running() else backend.resume_agent
         self._pause_task = Task(operation, self)
         self._pause_task.done.connect(self._pause_finished)
         self._pause_task.start()
@@ -818,6 +830,20 @@ class SettingsPage(QWidget):
         self.threshold_note = _muted("")
         form.addWidget(self.threshold_note)
 
+        form.addWidget(_title("Proof of life", "h2"))
+        self.liveness = SegmentedTiles((
+            ("heavy", "Heavy", "block photos & screens, accept a blink or movement"),
+            ("strict", "Strict", "block photos & screens, require a blink"),
+        ))
+        form.addWidget(self.liveness)
+        self.liveness_note = _muted(
+            "A still photo or a phone screen showing your face cannot blink, so it "
+            "never unlocks. Glare, screen glow, device edges and print patterns fail "
+            "the scan outright. A video replay of you is not detectable by a normal camera."
+        )
+        self.liveness_note.setWordWrap(True)
+        form.addWidget(self.liveness_note)
+
         form.addWidget(_title("Give up after", "h2"))
         timeout_row = QHBoxLayout()
         self.timeout = NumberField()
@@ -867,6 +893,7 @@ class SettingsPage(QWidget):
         self.threshold.setValue(int(round(settings.threshold * 100)))
         self._threshold_changed(self.threshold.value())
         self.timeout.setValue(int(settings.timeout))
+        self.liveness.set_value(backend._liveness_mode(settings.liveness))
         self.status.setText("")
 
     def _selection_changed(self, *_args) -> None:
@@ -924,6 +951,7 @@ class SettingsPage(QWidget):
             camera=self.window.settings.camera,
             idle_lock_enabled=self.window.settings.idle_lock_enabled,
             idle_lock_minutes=self.window.settings.idle_lock_minutes,
+            liveness=backend._liveness_mode(self.liveness.value()),
         )
         was_running = backend.agent_running()
 
@@ -1252,6 +1280,36 @@ class AboutPage(QWidget):
             self.repo_button,
         ))
         content.addWidget(info)
+        content.addWidget(_title("Windows sign-in help", "h2"))
+        self.account_status = _muted(
+            "Check your sign-in type to see which account name Glance should use."
+        )
+        self.identify_account_button = QPushButton("Check sign-in type")
+        self.identify_account_button.clicked.connect(self._identify_account)
+        self.check_password_button = QPushButton("Check password")
+        self.check_password_button.setEnabled(False)
+        self.check_password_button.clicked.connect(self._check_account_password)
+        self.signin_options_button = QPushButton("Open Sign-in options")
+        self.signin_options_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("ms-settings:signinoptions"))
+        )
+        sign_in = SettingsGroup()
+        sign_in.add_row(SettingsRow(
+            "Account type", "Identify the local, Microsoft, or work/school sign-in used by Windows.",
+            self.identify_account_button,
+        ))
+        sign_in.add_row(SettingsRow(
+            "Password check", "Verify the account and password with Windows. This does not save it.",
+            self.check_password_button,
+        ))
+        sign_in.add_row(SettingsRow(
+            "Windows Hello", "For Microsoft accounts, turn Off the Windows Hello-only sign-in option if needed.",
+            self.signin_options_button,
+        ))
+        sign_in.add_row(SettingsRow("Check result", "", self.account_status))
+        content.addWidget(sign_in)
+        self._account_info = None
+        self._account_task: Task | None = None
         content.addWidget(_title("Face models", "h2"))
         self.models_button = QPushButton()
         self.models_button.clicked.connect(self._manage_models)
@@ -1304,6 +1362,111 @@ class AboutPage(QWidget):
     def _show_logs(self) -> None:
         self.logs.refresh()
         self.pages.setCurrentWidget(self.logs)
+
+    def _identify_account(self) -> None:
+        if self._account_task is not None:
+            return
+        self.identify_account_button.setEnabled(False)
+        self.account_status.setText("Checking Windows sign-in details…")
+
+        def identify() -> tuple[bool, str]:
+            return True, json.dumps(asdict(backend.identify_windows_account()))
+
+        self._account_task = Task(identify, self)
+        self._account_task.done.connect(self._account_identified)
+        self._account_task.start()
+
+    def _account_identified(self, ok: bool, message: str) -> None:
+        self._account_task = None
+        self.identify_account_button.setEnabled(True)
+        if not ok:
+            self._account_info = None
+            self.check_password_button.setEnabled(False)
+            self.account_status.setText(message or "Could not check this Windows account.")
+            return
+        try:
+            self._account_info = json.loads(message)
+        except (TypeError, ValueError):
+            self._account_info = None
+        if not self._account_info:
+            self.check_password_button.setEnabled(False)
+            self.account_status.setText("Could not read the Windows account details. Try again.")
+            return
+        account = self._account_info.get("account", "")
+        kind = self._account_info.get("account_type", "Could not determine")
+        upn = self._account_info.get("upn", "")
+        details = [f"{kind}", f"Account: {account or 'not available'}"]
+        if upn:
+            details.append(f"UPN: {upn}")
+        if self._account_info.get("details"):
+            details.append(self._account_info["details"])
+        self.account_status.setText("\n".join(details))
+        self.check_password_button.setEnabled(bool(account))
+
+    def _check_account_password(self) -> None:
+        if not self._account_info or not self._account_info.get("account"):
+            return
+        PasswordCheckDialog(self, self._account_info["account"]).exec()
+
+
+class PasswordCheckDialog(QDialog):
+    """Check a Windows password without saving it."""
+
+    def __init__(self, parent, account: str):
+        super().__init__(parent)
+        self.setWindowTitle("Check Windows password")
+        self.setMinimumWidth(430)
+        self._task: Task | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+        layout.addWidget(_title("Check Windows password", "h2"))
+        layout.addWidget(_muted(
+            "Glance will ask Windows to verify this password. It will not be saved."
+        ))
+        layout.addWidget(_muted("Account"))
+        self.account = QLineEdit(account)
+        layout.addWidget(self.account)
+        layout.addWidget(_muted("Password"))
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("Enter your Windows password")
+        layout.addWidget(self.password)
+        self.status = _muted("")
+        layout.addWidget(self.status)
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        self.cancel = QPushButton("Close")
+        self.cancel.clicked.connect(self.reject)
+        controls.addWidget(self.cancel)
+        self.check_button = QPushButton("Check")
+        self.check_button.setObjectName("primary")
+        self.check_button.clicked.connect(self._check)
+        controls.addWidget(self.check_button)
+        layout.addLayout(controls)
+
+    def _check(self) -> None:
+        account = self.account.text().strip()
+        password = self.password.text()
+        if not account or not password:
+            self.status.setText("Enter both the account name and password.")
+            return
+        self.check_button.setEnabled(False)
+        self.cancel.setEnabled(False)
+        self.status.setText("Checking with Windows…")
+        self._task = Task(
+            lambda: backend.check_account_password(account, password), self
+        )
+        self._task.done.connect(self._checked)
+        self._task.start()
+
+    def _checked(self, ok: bool, message: str) -> None:
+        self._task = None
+        self.password.clear()
+        self.check_button.setEnabled(True)
+        self.cancel.setEnabled(True)
+        self.status.setText(message)
+        self.status.setStyleSheet(f"color: {ACCENT if ok else DANGER};")
 
 
 # --------------------------------------------------------------------------- #

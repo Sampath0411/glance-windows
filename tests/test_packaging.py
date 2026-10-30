@@ -297,6 +297,12 @@ class AppIconTests(unittest.TestCase):
         self.assertIn("turn **Off**", readme)
         self.assertIn("Windows credential provider", readme)
 
+    def test_readme_points_users_to_in_app_account_checks(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Check sign-in type", readme)
+        self.assertIn("Check password", readme)
+        self.assertIn("without opening PowerShell", readme)
+
     def test_build_and_installer_use_the_approved_icon(self) -> None:
         build = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("assets\\GlanceIcon.png", build)
@@ -307,6 +313,19 @@ class AppIconTests(unittest.TestCase):
 
 
 class InstallerPolicyTests(unittest.TestCase):
+    def test_agent_resume_task_is_separate_from_signin_autostart(self) -> None:
+        admin = (ROOT / "provider" / "GlanceAdmin.ps1").read_text(encoding="utf-8")
+        tasks = (ROOT / "provider" / "GlanceTasks.ps1").read_text(encoding="utf-8")
+        self.assertIn("Glance Agent Resume", admin)
+        self.assertIn("Register-GlanceResumeTask", admin)
+        self.assertIn("Microsoft-Windows-Power-Troubleshooter", tasks)
+        self.assertIn("EventID=1", tasks)
+        self.assertIn("--resume-after-wake", tasks)
+        uninstall = (ROOT / "provider" / "uninstall.ps1").read_text(encoding="utf-8")
+        self.assertIn("Remove-GlanceResumeTask", uninstall)
+        build = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("GlanceTasks.ps1", build)
+
     def test_inno_setup_is_protected_but_does_not_enable_provider_during_install(self) -> None:
         script = ROOT / "packaging" / "inno" / "Glance.iss"
         self.assertTrue(script.is_file(), "Inno Setup script is missing")

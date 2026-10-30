@@ -22,6 +22,8 @@ from pathlib import Path
 from ..agent.grant import clear_pending_grant
 from ..models import models_present, provision_models
 from ..paths import PATHS
+from .. import protection_state
+from .account_info import AccountInfo, detect_account
 
 DATA = PATHS.data_dir
 CONFIG_PATH = PATHS.config_path
@@ -78,7 +80,7 @@ def invalidate(*keys: str) -> None:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Settings:
-    """The agent reads the first three keys; the UI owns the last two."""
+    """The agent reads these keys; the UI owns the last three."""
 
     threshold: float = 0.60
     timeout: float = 90.0
@@ -87,6 +89,7 @@ class Settings:
     idle_lock_enabled: bool = False
     idle_lock_minutes: int = 5
     any_identity: bool = True
+    liveness: str = "heavy"
 
     @classmethod
     def load(cls) -> "Settings":
@@ -105,6 +108,7 @@ class Settings:
             idle_lock_enabled=data.get("idle_lock_enabled") is True,
             idle_lock_minutes=_idle_minutes(data),
             any_identity=data.get("any_identity") is not False,
+            liveness=_liveness_mode(data.get("liveness")),
         )
 
     def save(self) -> None:
@@ -116,11 +120,18 @@ class Settings:
             "idle_lock_enabled": bool(self.idle_lock_enabled),
             "idle_lock_minutes": max(1, min(120, int(self.idle_lock_minutes))),
             "any_identity": bool(self.any_identity),
+            "liveness": _liveness_mode(self.liveness),
         }
         PATHS.ensure_data_dir()
         temp = CONFIG_PATH.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.replace(temp, CONFIG_PATH)
+
+
+def _liveness_mode(value) -> str:
+    """Unknown values fall back to the protective default, never to light/off."""
+    text = str(value or "").strip().lower()
+    return text if text in ("light", "heavy", "strict") else "heavy"
 
 
 def _idle_minutes(data):
@@ -194,6 +205,24 @@ def stop_agent() -> tuple[bool, str]:
         invalidate("task")
         return True, "protection paused"
     return False, output or "could not stop the agent"
+
+
+def pause_agent_until_wake() -> tuple[bool, str]:
+    """Stop protection and preserve the user's pause until a wake event."""
+    if not protection_state.set_paused_until_wake(paused=True):
+        return False, "Could not save the pause state; protection was not stopped."
+    ok, message = stop_agent()
+    if not ok:
+        protection_state.set_paused_until_wake(paused=False)
+        return False, message
+    return True, "Protection paused until this PC wakes."
+
+
+def resume_agent() -> tuple[bool, str]:
+    """Clear an intentional pause and start the agent now."""
+    if not protection_state.set_paused_until_wake(paused=False):
+        return False, "Could not clear the saved pause state."
+    return start_agent()
 
 
 def start_agent() -> tuple[bool, str]:
@@ -486,6 +515,44 @@ def current_user_sid() -> str:
         return ""
     match = re.search(r"\bsid\s+(S-1-5-21-(?:\d+-){2,}\d+)\b", output, re.IGNORECASE)
     return match.group(1) if match else ""
+
+
+def identify_windows_account() -> AccountInfo:
+    """Return account details from Windows identity commands without a console."""
+    return detect_account()
+
+
+def check_account_password(account: str, password: str) -> tuple[bool, str]:
+    """Verify an account/password pair without storing or logging the password."""
+    account = account.strip()
+    if not account or not password:
+        return False, "Enter both the Windows account and password."
+    if not GRANT_TOOL.is_file():
+        return False, "Glance's password-check helper is missing. Repair or reinstall Glance."
+    try:
+        result = subprocess.run(
+            [str(GRANT_TOOL), "check", "--account", account, "--password-stdin"],
+            input=password,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Windows took too long to verify this account. Please try again."
+    except OSError as error:
+        return False, f"Glance could not start the password-check helper: {error}"
+
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    if "verify=ok" in output:
+        return True, "Windows accepted this account and password."
+    if "verify=rejected" in output:
+        return False, "Windows rejected this password or account name. Nothing was stored."
+    if "reason=lsa-unavailable" in output:
+        return False, "Windows could not perform the account check. Sign in to Windows and try again."
+    return False, output or "The password-check helper returned no result."
 
 
 def models_ready() -> bool:

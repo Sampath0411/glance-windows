@@ -170,6 +170,7 @@ foreach ($native in @('GlanceProvider.dll', 'grant_tool.exe')) {
     Copy-Item -LiteralPath $nativePath -Destination $providerStage -Force
 }
 Copy-Item -LiteralPath (Join-Path $repo 'provider\GlanceAdmin.ps1') -Destination $providerStage -Force
+Copy-Item -LiteralPath (Join-Path $repo 'provider\GlanceTasks.ps1') -Destination $providerStage -Force
 if (-not (Test-Path (Join-Path $distribution 'GlanceAgent.exe'))) {
     throw 'Packaged distribution is missing GlanceAgent.exe.'
 }

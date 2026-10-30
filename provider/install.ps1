@@ -23,6 +23,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $here 'GlanceTasks.ps1')
 $repo = Split-Path -Parent $here
 $dll = Join-Path $here 'build\GlanceProvider.dll'
 $tool = Join-Path $here 'build\grant_tool.exe'
@@ -175,7 +176,11 @@ if (-not $NoAutostart) {
 
         $action = "`"$pythonw`" `"$agent`""
         schtasks /create /tn 'Glance Agent' /tr $action /sc onlogon /rl limited /f | Out-Null
-        if ($LASTEXITCODE -eq 0) { Good "logon task 'Glance Agent' created" }
+        if ($LASTEXITCODE -eq 0) {
+            Good "logon task 'Glance Agent' created"
+            Register-GlanceResumeTask ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value) $pythonw "`"$agent`""
+            Good "wake task 'Glance Agent Resume' created"
+        }
         else { Warn 'could not create the logon task; start the agent by hand' }
     }
 } else {

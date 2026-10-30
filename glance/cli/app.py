@@ -116,7 +116,10 @@ def cmd_live(args) -> int:
         print("No enrolled identities. Run: python -m glance.cli.app enroll --name <you>", file=sys.stderr)
         return 1
 
-    mode = {"off": None, "light": lv.LivenessMode.LIGHT, "heavy": lv.LivenessMode.HEAVY}[args.liveness]
+    mode = {"off": None,
+            "light": lv.LivenessMode.LIGHT,
+            "heavy": lv.LivenessMode.HEAVY,
+            "strict": lv.LivenessMode.STRICT}[args.liveness]
     evaluator = lv.LivenessEvaluator(mode=mode) if mode else None
 
     cap = pipeline.open_camera(args.camera)
@@ -125,6 +128,8 @@ def cmd_live(args) -> int:
 
     meter = fps_meter()
     history: list[float] = []
+    openness_history: list[float] = []
+    motion_history: list = []
     try:
         while True:
             ok, frame = cap.read()
@@ -133,7 +138,7 @@ def cmd_live(args) -> int:
             frame = cv2.flip(frame, 1)
             fps = meter.tick()
 
-            emb, face, _ = pipeline.embedding_for(frame)
+            emb, face, aligned = pipeline.embedding_for(frame)
             verdict, detail, colour = "NO FACE", "", (150, 150, 150)
             live_line, live_colour = "", (200, 200, 200)
 
@@ -148,6 +153,8 @@ def cmd_live(args) -> int:
                 match = None
                 if face_fraction < MIN_FACE_FRACTION:
                     history.clear()
+                    openness_history.clear()
+                    motion_history.clear()
                     verdict = "TOO FAR - move closer"
                     detail = (f"face fills {face_fraction * 100:.1f}% of the frame; "
                               f"need {MIN_FACE_FRACTION * 100:.0f}% or more")
@@ -165,6 +172,8 @@ def cmd_live(args) -> int:
                     colour = (110, 230, 110)
                 elif face_fraction >= MIN_FACE_FRACTION:
                     history.clear()
+                    openness_history.clear()
+                    motion_history.clear()
                     best_any = max(
                         (i.score(emb) for i in pipeline.store.identities if i.samples),
                         key=lambda x: x[0],
@@ -174,7 +183,7 @@ def cmd_live(args) -> int:
                     detail = f"best centroid {best_any[0]:.3f}  (need {pipeline.threshold:.2f})"
                     colour = (90, 90, 230)
 
-                if evaluator is not None and face_fraction >= MIN_FACE_FRACTION:
+                if evaluator is not None and match:
                     # Deny cues read the native-resolution face crop and the full
                     # frame; confirm cues read the running scan window.
                     x1, y1, x2, y2 = [int(v) for v in face.bbox]
@@ -182,7 +191,22 @@ def cmd_live(args) -> int:
                     crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
                     glare = lv.extract_glare(crop)
                     device = lv.detect_device_rectangle(frame, tuple(face.bbox))
-                    snap = evaluator.observe(lv.readings(glare, device, None))
+                    screen = lv.extract_screen_glow(frame, tuple(face.bbox))
+                    texture = lv.extract_texture(crop)
+                    interocular = lv.interocular_distance(getattr(face, "kps", None))
+                    ratios = lv.landmark_ratios(getattr(face, "kps", None))
+                    if ratios is not None:
+                        motion_history.append(ratios)
+                        motion_history = motion_history[-12:]
+                    if aligned is not None:
+                        eye = lv.eye_openness(aligned, interocular)
+                        if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
+                            openness_history.append(eye.openness)
+                            openness_history = openness_history[-12:]
+                    snap = evaluator.observe(lv.readings(
+                        glare, device, openness_history, screen, texture,
+                        motion_history, interocular,
+                    ))
 
                     if snap.decision is lv.Decision.DENIED:
                         live_line = f"LIVENESS: DENIED - {snap.denial_reason()}"
@@ -193,13 +217,14 @@ def cmd_live(args) -> int:
                         by = f" ({snap.confirmed_by.title})" if snap.confirmed_by else ""
                         live_line = f"LIVENESS: pass [{evaluator.mode.value}]{by}"
                     else:
-                        glare_state = snap.states[lv.Cue.GLOSS_GLARE]
-                        device_state = snap.states[lv.Cue.DEVICE_DETECTED]
-                        live_line = (f"LIVENESS: scanning  glare {glare_state.frames_counted}"
-                                     f"/{evaluator.tuning.gloss_frames}  device "
-                                     f"{device_state.frames_counted}/{evaluator.tuning.device_frames}")
-            elif evaluator is not None:
-                evaluator.reset()  # face lost: this is a new scan
+                        live_line = (f"LIVENESS: scanning [{evaluator.mode.value}] "
+                                     f"blink {len(openness_history)}  motion {len(motion_history)}"
+                                     "  - blink or move your head")
+            else:
+                if evaluator is not None:
+                    evaluator.reset()  # face lost: this is a new scan
+                    openness_history.clear()
+                    motion_history.clear()
 
             draw_banner(frame, f"{verdict}   {fps:4.1f}fps", colour)
             if detail:
@@ -219,11 +244,13 @@ def cmd_live(args) -> int:
 def cmd_bench(args) -> int:
     """Per-stage cost of the full pipeline on this machine, plus liveness outcome."""
     pipeline = GlancePipeline(DATA_DIR / "identities.json", args.threshold)
-    evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode(args.liveness if args.liveness != "off"
-                                                         else "light"))
+    evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.from_name(
+        args.liveness if args.liveness != "off" else "light"))
     cap = pipeline.open_camera(args.camera)
-    timings = {"detect": [], "embed": [], "glare": [], "device": []}
+    timings = {"detect": [], "embed": [], "glare": [], "device": [], "screen": [], "moire": []}
     decisions: dict[str, int] = {}
+    openness_history: list[float] = []
+    motion_history: list = []
 
     print(f"bench: {args.frames} frames, liveness={args.liveness}\n")
     try:
@@ -258,8 +285,29 @@ def cmd_bench(args) -> int:
             device = lv.detect_device_rectangle(frame, tuple(face.bbox))
             timings["device"].append((time.perf_counter() - t0) * 1000)
 
+            t0 = time.perf_counter()
+            screen = lv.extract_screen_glow(frame, tuple(face.bbox))
+            timings["screen"].append((time.perf_counter() - t0) * 1000)
+
+            t0 = time.perf_counter()
+            texture = lv.extract_texture(crop)
+            timings["moire"].append((time.perf_counter() - t0) * 1000)
+
             if args.liveness != "off":
-                snap = evaluator.observe(lv.readings(glare, device, None))
+                interocular = lv.interocular_distance(getattr(face, "kps", None))
+                ratios = lv.landmark_ratios(getattr(face, "kps", None))
+                if ratios is not None:
+                    motion_history.append(ratios)
+                    del motion_history[:-12]
+                if aligned is not None:
+                    eye = lv.eye_openness(aligned, interocular)
+                    if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
+                        openness_history.append(eye.openness)
+                        del openness_history[:-12]
+                snap = evaluator.observe(lv.readings(
+                    glare, device, openness_history, screen, texture,
+                    motion_history, interocular,
+                ))
                 decisions[snap.decision.value] = decisions.get(snap.decision.value, 0) + 1
     finally:
         cap.release()
@@ -276,6 +324,8 @@ def cmd_bench(args) -> int:
         s += timings['embed'][i] if i < len(timings['embed']) else 0
         s += timings['glare'][i] if i < len(timings['glare']) else 0
         s += timings['device'][i] if i < len(timings['device']) else 0
+        s += timings['screen'][i] if i < len(timings['screen']) else 0
+        s += timings['moire'][i] if i < len(timings['moire']) else 0
         total.append(s)
     if total:
         print(f"  {'TOTAL':8s} {np.mean(total):6.1f} ms  -> {1000 / np.mean(total):4.1f} fps")
@@ -345,8 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     ap.add_argument("--camera", type=int, default=0)
-    ap.add_argument("--liveness", choices=["off", "light", "heavy"], default="light",
-                    help="light = deny cues only (Glance default), heavy = also require a confirm cue")
+    ap.add_argument("--liveness", choices=["off", "light", "heavy", "strict"], default="heavy",
+                    help="heavy = block spoofs and require a blink or movement (default); "
+                         "strict = require a blink; light = deny cues only (diagnostics)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_scan_options(p: argparse.ArgumentParser) -> None:
@@ -359,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
         """
         p.add_argument("--threshold", type=float, default=argparse.SUPPRESS)
         p.add_argument("--camera", type=int, default=argparse.SUPPRESS)
-        p.add_argument("--liveness", choices=["off", "light", "heavy"],
+        p.add_argument("--liveness", choices=["off", "light", "heavy", "strict"],
                        default=argparse.SUPPRESS)
 
     e = sub.add_parser("enroll", help="capture face samples")

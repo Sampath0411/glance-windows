@@ -29,8 +29,8 @@ the lock screen stays Windows' own.
 > Most Windows PCs don't have the infrared or depth sensors that make Windows Hello
 > trustworthy and secure. A normal webcam sees a flat 2D image. That means:
 >
-> - Glance defeats, with reasonable confidence, a printed photo and a photo on a phone
->   screen when **Heavy** liveness detection is on.
+> - Glance defeats, with reasonable confidence, a printed photo and a still photo on a phone
+>   screen with the default **Heavy** liveness detection.
 > - Glance does not reliably defeat a video of you.
 > - Windows has no public API that lets a third-party app authorize a normal sign-in, so
 >   Glance installs a Credential Provider. After a face check, that provider submits your
@@ -79,6 +79,12 @@ name must match exactly: Glance hands the pair to Windows to verify before anyth
 stored, and a name that resolves to no user comes back as the same `rejected` message as a
 wrong password.
 
+You can do this without opening PowerShell. In Glance, open **About → Windows sign-in help**
+and choose **Check sign-in type**. Glance shows the account type and the name it detected.
+Choose **Check password** to verify the pair without saving it; the password is entered in a
+masked Glance dialog. If Windows cannot identify the account type reliably, Glance says so
+instead of guessing. The commands below are optional manual diagnostics.
+
 | Sign-in type | Account field |
 |---|---|
 | Microsoft account | `MicrosoftAccount\you@outlook.com` |
@@ -101,7 +107,8 @@ container. If the PC signs in with Hello only, the account first needs a real pa
 
 ### Microsoft accounts: allow password sign-in
 
-On Microsoft-account PCs, open **Settings → Accounts → Sign-in options**. Under **Additional
+In Glance's **About → Windows sign-in help**, choose **Open Sign-in options**. On
+Microsoft-account PCs, under **Additional
 settings**, turn **Off** “For improved security, only allow Windows Hello sign-in for Microsoft
 accounts on this device (Recommended)”. When this switch is On, Windows restricts the account
 to Windows Hello sign-in; Glance's Windows credential provider needs the verified account
@@ -180,7 +187,7 @@ fails closed if the camera or face models are unavailable.
 | **Face unlock** | Runs after Windows locks. The agent does nothing while the desktop is unlocked. |
 | **Multiple identities** | Enroll several people or several versions of yourself. Any enrolled face may authorize an unlock, or restrict it to one person in Recognition. |
 | **In-app face check** | Opening Your Face or Password first matches an enrolled face in a centered pop-up. Three stable matches are required; there is no camera preview. This app gate does not run liveness checks, so a photograph could pass it; the Windows lock-screen provider retains liveness checks. |
-| **Liveness checks** | Watches for glare and screen-shaped objects, with optional blink confirmation. *Light*, *Heavy*, or off. |
+| **Liveness checks** | Four deny cues and two confirm cues decide whether the face in front of the camera is a person, a printed photo, or a phone screen. *Heavy* (default) or *Strict*. |
 | **Native Windows** | A real Win32 window: frameless glass shell, grouped sidebar, custom caption buttons, edge resize, snap, and maximise. |
 | **Glass interface** | A painted aurora backdrop under translucent panels, glass setting groups, and Windows-style window controls. |
 | **Six focused screens** | General, Your Face, Password, Camera, Recognition, and About. |
@@ -249,17 +256,40 @@ Runtime. Glance does not send face data, camera frames, or credentials to a serv
 
 ### How it tells a face from a photo
 
-Five independent cues over a rolling window, in two roles:
+Six independent cues over a rolling window, in two roles. They are never averaged into a
+single score:
 
-- **Deny cues** are evidence of a spoof — screen glare, or a device-shaped rectangle framing
-  the face. Either one fails the scan outright and overrides anything else.
-- **Confirm cues** are evidence of a real face — face geometry, nose parallax across head
-  turns, blinks. Any one is enough, and their absence is never a failure, since a live person
-  can sit still and not blink.
+- **Deny cues** are evidence of a spoof. Any one of them fails the scan outright and overrides
+  every confirm cue:
+  - **Glare** — one large flat specular blob where a real face would show scattered skin
+    highlights, as a glossy print or a glass-covered screen does.
+  - **Screen glow** — a bright, colour-neutral, almost textureless panel immediately around
+    the face, which is what a held-up phone or a monitor looks like.
+  - **Device edges** — a device-shaped rectangle framing the face, including a phone whose
+    screen edge only partly encloses a close-up face. A doorway or window is far larger than
+    the face and does not count.
+  - **Print or moiré texture** — a periodic pattern in the face crop, from a photographed
+    display pixel grid or a printed halftone. The cue only fires when that pattern is actually
+    visible, so smooth skin and soft lighting gradients do not trip it.
+- **Confirm cues** are evidence of a real face. Either one is enough, and their absence is
+  never a failure, because a live person can sit still and not blink:
+  - **Blink** — a dip and recovery in open-eye darkness, measured from the pixels inside the
+    aligned face. A still photo cannot blink.
+  - **Micro-motion** — variation in landmark distances *relative to the distance between the
+    eyes*. A held photo keeps those ratios constant however it is moved, turned, or brought
+    closer; a real face changes them with expression and breathing.
 
-**Light** detection only uses deny cues. **Heavy** detection also requires a confirm cue. In
-the current Windows port, blink is the working confirm cue; the two geometry-based confirm
-cues abstain until a head-yaw source is added.
+**Heavy** (the default) requires a confirm cue and rejects any deny cue. **Strict** requires a
+blink specifically, for people who would rather blink than rely on natural movement. There is
+no off switch; a missing or malformed setting is read as Heavy, never as disabled. When a
+matching face is seen but no proof of life arrives before the timeout, the agent records a
+denial rather than "no face", so the log says what happened.
+
+What this can and cannot do: a printed photo or a still image on a phone or monitor cannot
+satisfy either confirm cue, so it will not unlock. A **video replay** of the right person can
+blink and move; no RGB-only liveness check can defeat that, and Glance does not claim to. Real
+IR or depth hardware is the only reliable answer to a video, and most Windows laptops do not
+have it.
 
 ---
 

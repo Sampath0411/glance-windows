@@ -42,7 +42,11 @@ def main() -> int:
     check("options before the subcommand still work", a.liveness == "heavy", a.liveness)
 
     a = parse(["live"])
-    check("live alone keeps the light default", a.liveness == "light", a.liveness)
+    check("live alone defaults to heavy, not the photo-friendly light mode",
+          a.liveness == "heavy", a.liveness)
+
+    a = parse(["live", "--liveness", "strict"])
+    check("live --liveness strict", a.liveness == "strict", a.liveness)
 
     a = parse(["live", "--threshold", "0.7", "--camera", "2"])
     check("threshold and camera accepted after the subcommand",

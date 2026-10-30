@@ -16,6 +16,7 @@ $filterReg = "$registryBase\Credential Provider Filters\$guid"
 $clsidReg = "SOFTWARE\Classes\CLSID\$guid"
 $glanceReg = 'SOFTWARE\Glance'
 $machineData = Join-Path $env:ProgramData 'Glance'
+. (Join-Path $PSScriptRoot 'GlanceTasks.ps1')
 
 function Write-Result([string]$Status, [string]$Message) {
     $record = @{ operation = $Operation; status = $Status; message = $Message } |
@@ -38,6 +39,7 @@ function Get-TaskService {
 }
 
 function Stop-AndRemoveAgentTask {
+    Remove-GlanceResumeTask
     $service = Get-TaskService
     $folder = $service.GetFolder('\')
     try {
@@ -192,7 +194,8 @@ try {
             $trigger = $task.Triggers.Create(9) # TASK_TRIGGER_LOGON
             $trigger.UserId = $TargetSid
             $folder.RegisterTaskDefinition('Glance Agent', $task, 6, $TargetSid, $null, 3, $null) | Out-Null
-            Write-Result 'ok' 'Provider registered and user agent task installed.'
+            Register-GlanceResumeTask $TargetSid $agent
+            Write-Result 'ok' 'Provider registered; sign-in and wake agent tasks installed.'
         }
         'disable-provider' {
             Disable-Provider $true
@@ -207,12 +210,14 @@ try {
             $registered = Test-Path -LiteralPath "HKLM:\$providerReg"
             $task = $false
             try { $null = (Get-TaskService).GetFolder('\').GetTask('Glance Agent'); $task = $true } catch { }
+            $resumeTask = $false
+            try { $null = (Get-TaskService).GetFolder('\').GetTask('Glance Agent Resume'); $resumeTask = $true } catch { }
             $credential = $false
             if (Test-Path -LiteralPath $grantTool) {
                 $status = & $grantTool status 2>&1 | Out-String
                 $credential = $LASTEXITCODE -eq 0 -and $status -match 'stored credential:\s*present'
             }
-            Write-Result 'ok' (@{ provider = $registered; task = $task; credential = $credential } | ConvertTo-Json -Compress)
+            Write-Result 'ok' (@{ provider = $registered; task = $task; resumeTask = $resumeTask; credential = $credential } | ConvertTo-Json -Compress)
         }
     }
     exit 0

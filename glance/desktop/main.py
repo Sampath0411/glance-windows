@@ -22,16 +22,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import time
 
+from .. import __version__
 from . import backend
 from .camera import CameraWorker
 from .face_gate import FaceGateDialog
 from .models_setup import ModelsDialog
 from .onboarding import FirstRunDialog
 from .pages import (
-    AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog,
+    AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog, Task,
     PasswordPage, RecognitionPage,
 )
+from .. import protection_state
+from .recovery import should_recover_agent
 from .settings_widgets import FloatingTabBar
 from .navigation import Sidebar, WindowControls, style_native_window
 from .theme import (
@@ -41,6 +45,7 @@ from .theme import (
     resolve_theme,
     windows_appearance,
 )
+from . import ui_state
 
 APP_MUTEX = "Local\\GlanceDesktop"
 
@@ -67,6 +72,9 @@ class MainWindow(QMainWindow):
         self._current_index = 0
         self._owners: set[str] = set()
         self._quitting = False
+        self._agent_was_active_this_session = backend.agent_running()
+        self._recovery_task: Task | None = None
+        self._last_recovery_attempt = 0.0
         self._camera_stop_timer = QTimer(self)
         self._camera_stop_timer.setSingleShot(True)
         self._camera_stop_timer.setInterval(250)
@@ -329,10 +337,47 @@ class MainWindow(QMainWindow):
         if not FirstRunDialog.is_completed():
             FirstRunDialog(self).exec()
 
+    def show_whats_new_if_needed(self) -> None:
+        if not ui_state.should_show_whats_new(__version__):
+            return
+        QMessageBox.information(
+            self,
+            f"What's new in Glance {__version__}",
+            "Glance now helps identify your Windows account and check your password "
+            "without PowerShell. It can start face monitoring quietly at sign-in and "
+            "recover protection after your PC wakes from sleep.",
+        )
+        ui_state.mark_whats_new_shown(__version__)
+
+    def offer_startup_if_needed(self) -> None:
+        state = backend.task_state(0)
+        if (not state.get("present") or state.get("enabled") or
+                not ui_state.should_offer_startup_prompt()):
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Start Glance with Windows?")
+        box.setText(
+            "Glance can monitor for face unlock quietly in the background after you "
+            "sign in. The Glance window will stay closed. You can change this later "
+            "in Settings."
+        )
+        enable = box.addButton("Enable", QMessageBox.AcceptRole)
+        later = box.addButton("Later", QMessageBox.RejectRole)
+        box.exec()
+        choice = box.clickedButton()
+        if choice is later:
+            ui_state.dismiss_startup_prompt()
+        elif choice is enable:
+            ok, message = backend.set_autostart(True)
+            if not ok:
+                QMessageBox.warning(self, "Glance", message)
+
     def startup_sequence(self) -> None:
         """Ask for the downloadable face models, then show the setup guide."""
         ModelsDialog.ensure_models(self)
         self.show_first_run_if_needed()
+        self.show_whats_new_if_needed()
+        self.offer_startup_if_needed()
 
     # -- reactions to changes ---------------------------------------------
     def on_identities_changed(self, name: str) -> None:
@@ -366,6 +411,8 @@ class MainWindow(QMainWindow):
 
     def _start_agent_again(self) -> None:
         ok, message = backend.start_agent()
+        if ok:
+            self._agent_was_active_this_session = True
         if not ok:
             QMessageBox.warning(self, "Glance", message)
         self._refresh_chip()
@@ -376,12 +423,49 @@ class MainWindow(QMainWindow):
 
     def _refresh_chip(self) -> None:
         running = backend.agent_running()
+        paused = protection_state.is_paused_until_wake()
+        if running:
+            self._agent_was_active_this_session = True
+        self._maybe_recover_agent(running)
+        status = "Protected" if running else (
+            "Paused until wake" if paused else "Protection stopped"
+        )
         self.nav.set_status(
-            "Protected" if running else "Paused",
+            status,
             ACCENT if running else "#e3b341",
         )
         if self._tray is not None:
-            self._tray.setToolTip("Glance · protected" if running else "Glance · paused")
+            self._tray.setToolTip(
+                "Glance · protected" if running else f"Glance · {status.lower()}"
+            )
+
+    def _maybe_recover_agent(self, running: bool) -> None:
+        paused = protection_state.is_paused_until_wake()
+        installed = backend.task_state().get("present", False)
+        if not should_recover_agent(
+            self._agent_was_active_this_session, installed, running, paused
+        ):
+            return
+        now = time.monotonic()
+        if self._recovery_task is not None or now - self._last_recovery_attempt < 30:
+            return
+        self._last_recovery_attempt = now
+        self._recovery_task = Task(backend.resume_agent, self)
+        self._recovery_task.done.connect(self._agent_recovery_finished)
+        self._recovery_task.start()
+
+    def _agent_recovery_finished(self, ok: bool, message: str) -> None:
+        self._recovery_task = None
+        if ok:
+            self._agent_was_active_this_session = True
+        elif self._tray is not None:
+            self._tray.showMessage(
+                "Glance protection stopped",
+                f"Glance could not restart face protection. Open Glance and select Resume protection. {message}",
+                QSystemTrayIcon.Warning,
+                6000,
+            )
+        self._refresh_chip()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._quitting or self._tray is None or not self._tray.isVisible():
@@ -421,10 +505,13 @@ def build_tray(window: MainWindow) -> QSystemTrayIcon:
     menu.addAction(lock_action)
 
     pause_action = QAction("Pause protection", menu, checkable=True)
+    pause_action.setToolTip("Protection resumes when this PC wakes from sleep.")
     pause_action.setChecked(not backend.agent_running())
 
     def toggle_pause(checked: bool) -> None:
-        ok, message = (backend.stop_agent() if checked else backend.start_agent())
+        ok, message = (
+            backend.pause_agent_until_wake() if checked else backend.resume_agent()
+        )
         if not ok:
             tray.showMessage("Glance", message, QSystemTrayIcon.Warning, 4000)
         window._refresh_chip()
