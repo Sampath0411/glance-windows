@@ -34,6 +34,18 @@ from glance.desktop.pages import EnrollPage, PasswordDialog, SettingsPage
 from glance.desktop.main import MainWindow
 
 
+def wait_for(predicate, timeout_ms: int = 4000) -> bool:
+    """Pump the event loop until predicate() holds. Wall-clock qWait alone is
+    not enough on a loaded machine: the timer callback can still be queued when
+    the fixed wait expires."""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        QTest.qWait(20)
+    return bool(predicate())
+
+
 class ProbeWorker(CameraWorker):
     """Small real QThread that emits frames without touching camera hardware."""
 
@@ -302,7 +314,8 @@ class AdaptiveThemeTests(unittest.TestCase):
             self.assertTrue(FirstRunDialog.is_completed(settings))
             window.close()
 
-    def test_dashboard_routes_uninstalled_agent_to_in_app_setup(self) -> None:
+    @patch.object(desktop_main.backend, "identity_summary", return_value=[])
+    def test_dashboard_routes_uninstalled_agent_to_in_app_setup(self, _identities) -> None:
         window = MainWindow()
         window.dashboard._apply_snapshot({
             "task": {"present": False, "enabled": False},
@@ -849,8 +862,7 @@ class FaceGateTests(unittest.TestCase):
         camera.gate.emit("Anu", 0.95, "")
         # Force the remaining scan window to expire and check the timeout path.
         dialog._scan_timer.start(20)
-        QTest.qWait(300)
-        self.assertFalse(dialog.is_scanning())
+        self.assertTrue(wait_for(lambda: not dialog.is_scanning()))
         self.assertEqual(dialog.matched_name, "")
         self.assertEqual(dialog.animation.state, "failure")
         self.assertTrue(dialog.retry_visible())
@@ -860,8 +872,7 @@ class FaceGateTests(unittest.TestCase):
         dialog, events, _parent = self.make_dialog(camera)
         with patch.object(face_gate, "SUCCESS_HOLD_MS", 0):
             self.show_dialog(dialog, timeout=0.08)
-            QTest.qWait(200)
-            self.assertFalse(dialog.is_scanning())
+            self.assertTrue(wait_for(lambda: not dialog.is_scanning()))
             self.assertTrue(dialog.retry_visible())
             self.assertIn("verify", dialog.status.text().lower())
             self.assertFalse(camera.gate_enabled)
