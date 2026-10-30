@@ -53,6 +53,12 @@ from enum import Enum
 import cv2
 import numpy as np
 
+SMILE_BASELINE_SAMPLES = 4
+SMILE_ONSET_SAMPLES = 3
+SMILE_RELAX_SAMPLES = 3
+SMILE_MIN_WIDTH_CHANGE = 0.10
+SMILE_RELAX_WIDTH_CHANGE = 0.045
+
 # --------------------------------------------------------------------------- #
 # cue vocabulary - mirrors LivenessCues.swift
 # --------------------------------------------------------------------------- #
@@ -663,6 +669,97 @@ MIN_TEXTURE_CONFIDENCE = 0.35
 class EyeSample:
     openness: float       # share of eye-patch pixels clearly darker than skin
     confidence: float
+
+
+@dataclass(frozen=True)
+class SmileSample:
+    """Mouth-corner width relative to eye spacing; confidence is image/pose quality."""
+
+    width_ratio: float
+    confidence: float
+
+
+def extract_smile_sample(aligned_bgr: np.ndarray, landmarks) -> SmileSample | None:
+    """Measure normalized mouth width from SCRFD's five facial landmarks.
+
+    A sample is rejected when the aligned crop is unusable, the face is too
+    small, or the face geometry is strongly non-frontal. This is a challenge
+    measurement, not a standalone smile classifier.
+    """
+    if aligned_bgr is None or aligned_bgr.size == 0 or min(aligned_bgr.shape[:2]) < 64:
+        return None
+    try:
+        points = np.asarray(landmarks, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    if points.ndim != 2 or points.shape[0] < 5 or points.shape[1] != 2:
+        return None
+    if not np.isfinite(points[:5]).all():
+        return None
+    left_eye, right_eye, nose, left_mouth, right_mouth = points[:5]
+    eye_width = float(np.linalg.norm(right_eye - left_eye))
+    mouth_width = float(np.linalg.norm(right_mouth - left_mouth))
+    if eye_width < 18.0 or mouth_width < eye_width * 0.25 or mouth_width > eye_width * 1.35:
+        return None
+    eye_center = (left_eye + right_eye) / 2.0
+    mouth_center = (left_mouth + right_mouth) / 2.0
+    eye_mid = float(eye_center[0])
+    if abs(float(nose[0]) - eye_mid) / eye_width > 0.30:
+        return None
+    if not 0.50 <= float(mouth_center[1] - eye_center[1]) / eye_width <= 1.65:
+        return None
+    gray = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY)
+    mean_luma = float(gray.mean())
+    if not 18.0 <= mean_luma <= 245.0:
+        return None
+    return SmileSample(mouth_width / eye_width, _ramp(eye_width, 18.0, 42.0))
+
+
+class SmileTracker:
+    """Require an observed neutral→smile→relax transition within one scan."""
+
+    def __init__(self):
+        self._baseline: list[float] = []
+        self._onset = 0
+        self._relax = 0
+        self.confirmed = False
+
+    def reset(self) -> None:
+        self._baseline.clear()
+        self._onset = 0
+        self._relax = 0
+        self.confirmed = False
+
+    def observe(self, sample: SmileSample | None) -> "CueReading":
+        if self.confirmed:
+            return CueReading(1.0, 1.0)
+        if sample is None or sample.confidence < MIN_OPENNESS_CONFIDENCE:
+            self.reset()
+            return CueReading.none()
+        width = float(sample.width_ratio)
+        if not np.isfinite(width):
+            self.reset()
+            return CueReading.none()
+        if len(self._baseline) < SMILE_BASELINE_SAMPLES:
+            self._baseline.append(width)
+            return CueReading.none()
+        baseline = float(np.median(self._baseline))
+        if self._onset < SMILE_ONSET_SAMPLES:
+            if width >= baseline + SMILE_MIN_WIDTH_CHANGE:
+                self._onset += 1
+            else:
+                self._onset = 0
+                self._baseline.append(width)
+                del self._baseline[:-SMILE_BASELINE_SAMPLES]
+            return CueReading.none()
+        if width <= baseline + SMILE_RELAX_WIDTH_CHANGE:
+            self._relax += 1
+            if self._relax >= SMILE_RELAX_SAMPLES:
+                self.confirmed = True
+                return CueReading(1.0, 1.0)
+        else:
+            self._relax = 0
+        return CueReading.none()
 
 
 def _patch(gray: np.ndarray, width: int, height: int,

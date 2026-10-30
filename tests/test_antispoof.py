@@ -129,6 +129,43 @@ class BlinkTests(unittest.TestCase):
         self.assertLess(sample.confidence, lv.MIN_OPENNESS_CONFIDENCE)
 
 
+class SmileTrackerTests(unittest.TestCase):
+    @staticmethod
+    def feed(tracker, values, confidence=1.0):
+        reading = lv.CueReading.none()
+        for value in values:
+            reading = tracker.observe(lv.SmileSample(value, confidence))
+        return reading
+
+    def test_neutral_smile_relax_sequence_confirms(self):
+        tracker = lv.SmileTracker()
+        self.feed(tracker, [.60] * 4)
+        self.feed(tracker, [.78] * 3)
+        reading = self.feed(tracker, [.62] * 3)
+        self.assertEqual(reading, lv.CueReading(1.0, 1.0))
+
+    def test_static_smiling_photo_does_not_confirm(self):
+        tracker = lv.SmileTracker()
+        reading = self.feed(tracker, [.78] * 12)
+        self.assertEqual(reading.confidence, 0.0)
+
+    def test_neutral_face_and_small_changes_do_not_confirm(self):
+        tracker = lv.SmileTracker()
+        self.feed(tracker, [.60, .61, .60, .62] * 3)
+        self.assertFalse(tracker.confirmed)
+
+    def test_low_quality_sample_resets_sequence(self):
+        tracker = lv.SmileTracker()
+        self.feed(tracker, [.60] * 4)
+        tracker.observe(lv.SmileSample(.80, 0.0))
+        self.assertFalse(tracker.confirmed)
+
+    def test_smile_measurement_rejects_bad_landmark_geometry(self):
+        aligned = _synthetic_aligned(open_eye=True)
+        bad = np.zeros((5, 2), dtype=np.float32)
+        self.assertIsNone(lv.extract_smile_sample(aligned, bad))
+
+
 class MotionTests(unittest.TestCase):
     @staticmethod
     def base():
