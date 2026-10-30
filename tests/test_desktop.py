@@ -99,7 +99,7 @@ class CameraLifecycleTests(unittest.TestCase):
         self.assertTrue(worker.request_capture(), "first ready capture request must be accepted")
         self.assertFalse(worker.request_capture(), "a pending capture must not be coalesced")
 
-    def test_gate_mode_emits_the_best_match_without_a_capture_request(self) -> None:
+    def test_gate_mode_withholds_matching_identity_without_proof_of_life(self) -> None:
         class FakeCamera:
             def read(self):
                 return True, np.zeros((100, 100, 3), dtype=np.uint8)
@@ -133,9 +133,11 @@ class CameraLifecycleTests(unittest.TestCase):
         try:
             self.assertTrue(worker._ready.wait(1.0), "camera worker never became ready")
             worker.set_gate(True)
-            name, score, _hint = results.get(timeout=2.0)
-            self.assertEqual(name, "Sampath")
-            self.assertGreaterEqual(score, 0.9)
+            for _ in range(4):
+                name, score, hint = results.get(timeout=2.0)
+                self.assertEqual(name, "")
+                self.assertEqual(score, 0.0)
+                self.assertTrue(hint)
             worker.set_gate(False)
             while not results.empty():
                 results.get_nowait()
@@ -224,6 +226,26 @@ class AdaptiveThemeTests(unittest.TestCase):
         row.subtitle.setVisible(True)
         self.assertFalse(row.subtitle.isHidden())
         self.assertEqual(row.subtitle.text(), "Installed and checksum-verified.")
+
+    def test_about_signin_controls_do_not_collapse_in_a_short_viewport(self) -> None:
+        from glance.desktop.pages import AboutPage
+        page = AboutPage(SimpleNamespace())
+        page.setStyleSheet(theme.resolve_theme("dark").stylesheet)
+        page.resize(800, 500)
+        page.show()
+        try:
+            self.app.processEvents()
+            for button in (page.identify_account_button, page.check_password_button,
+                           page.signin_options_button):
+                self.assertGreaterEqual(button.height(), button.minimumSizeHint().height())
+            page.account_status.setText("Microsoft account\nAccount: person@example.com\n" +
+                                        "Long account guidance. " * 30)
+            self.app.processEvents()
+            self.assertTrue(page.account_status.wordWrap())
+            self.assertTrue(wait_for(lambda: page.account_status.height() >=
+                                     page.account_status.heightForWidth(page.account_status.width())))
+        finally:
+            page.close()
 
     def test_light_and_dark_themes_have_distinct_surfaces(self) -> None:
         self.assertTrue(hasattr(theme, "resolve_theme"), "theme resolver is not implemented")

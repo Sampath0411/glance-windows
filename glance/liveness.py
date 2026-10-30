@@ -10,7 +10,7 @@ copying exactly, because it is unusually well thought out:
   * firing is latched per scan, and counting is cumulative not consecutive,
     so a single-frame landmark dropout doesn't reset progress
   * Light mode  = deny only, "confirmed unless proven wrong"  <- diagnostics only
-  * Heavy mode  = deny cues, plus at least one CONFIRM cue must fire  <- default
+   * Heavy mode  = deny cues, plus a blink must fire  <- default
   * Strict mode = deny cues, plus a blink is mandatory
 
 Implemented deny cues:
@@ -29,10 +29,9 @@ Implemented confirm cues:
                        are widely misquoted, so the eye patches are taken from
                        the fixed ArcFace template positions instead of landmark
                        indices.
-  * microMotion      - variation of rigid-invariant landmark distance ratios.
-                       A flat photo, however it is moved or rotated, keeps those
-                       ratios constant; a real face changes them with expression
-                       and breathing.
+   * microMotion      - diagnostic variation of landmark distance ratios only.
+                        Detector jitter and perspective changes on a phone can
+                        trigger it, so it is never authorization evidence.
 
 Deliberately abstaining:
   * flatVs3D, depthPose - these need a reliable head-yaw source. Glance gets yaw
@@ -40,11 +39,10 @@ Deliberately abstaining:
     deriving yaw from the nose offset it is then correlated against would make
     the cue trivially self-confirming. An honest abstention beats a fake pass.
 
-Known limit, stated plainly: a *video* replay of the right person can blink. No
-RGB-only liveness check can defeat that; it needs an IR/depth sensor. What this
-module does guarantee is that a single still photo or a static phone screen can
-never satisfy a confirm cue, and that several independent deny cues fail the
-scan outright when the spoof is visible in the frame.
+Known limit: these RGB-camera heuristics are not proof of physical presence.
+Video replay, illumination changes, and alignment errors can fool pixel cues.
+Real-camera spoof validation is necessary; synthetic checks do not establish
+that all phones or printed photos are rejected.
 """
 
 from __future__ import annotations
@@ -213,10 +211,10 @@ class Snapshot:
         return "Liveness check failed."
 
     def waiting_reason(self) -> str:
-        """What a still photo will wait on forever, for user-facing logs."""
+        """Describe the required proof of life for user-facing logs."""
         if self.decision is Decision.CONFIRMED:
             return "confirmed"
-        return "no blink or natural movement seen yet"
+        return "no blink seen yet"
 
 
 class LivenessEvaluator:
@@ -259,15 +257,11 @@ class LivenessEvaluator:
             if self.mode is LivenessMode.LIGHT:
                 if self.frames_observed >= self.tuning.light_mode_minimum_frames:
                     decision = Decision.CONFIRMED
-            elif self.mode is LivenessMode.STRICT:
+            else:
+                # Landmark motion is diagnostic only: detector jitter and a
+                # tilted phone can change these ratios without a live face.
                 if Cue.BLINK in self.enabled_cues and self.states[Cue.BLINK].has_fired:
                     decision, confirmed_by = Decision.CONFIRMED, Cue.BLINK
-            else:
-                for cue in Cue:
-                    if (cue.role is CueRole.CONFIRM and cue in self.enabled_cues
-                            and self.states[cue].has_fired):
-                        decision, confirmed_by = Decision.CONFIRMED, cue
-                        break
 
         return Snapshot(decision, denied_by, confirmed_by, self.states, self.frames_observed)
 
@@ -689,8 +683,8 @@ def eye_openness(aligned_bgr: np.ndarray, interocular_px: float) -> EyeSample | 
     """Bilateral eye darkness relative to the surrounding skin.
 
     An open eye puts a dark iris and bright sclera inside the patch; a closed
-    eye is mostly skin. Both eyes are averaged, so landmark jitter on one side
-    cannot fake a blink.
+    eye is mostly skin. Both eyes are averaged; this heuristic can still be
+    affected by alignment jitter or illumination changes.
     """
     if aligned_bgr is None or aligned_bgr.size == 0:
         return None
@@ -720,7 +714,7 @@ def eye_openness(aligned_bgr: np.ndarray, interocular_px: float) -> EyeSample | 
 
 def blink_reading(openness_history: list[float],
                   min_absolute_drop: float = 0.012) -> CueReading:
-    """Dip-and-recovery in bilateral eye openness. A still photo cannot blink.
+    """Dip-and-recovery in estimated eye openness, not a physical-presence proof.
 
     Needs a dip below 0.62 of baseline, an absolute change big enough that
     patch jitter cannot produce it, and recovery above 0.82 within three
@@ -768,8 +762,8 @@ def landmark_ratios(landmarks) -> np.ndarray | None:
     """Five landmark distances divided by interocular distance.
 
     Every term is a ratio of distances, so translation, rotation and uniform
-    scale cancel. Moving or turning a flat photo therefore cannot manufacture
-    variation the way raw x/y offsets could.
+    scale cancel. Perspective changes and detector jitter do not cancel, so
+    these ratios must not be used to authorize an unlock.
     """
     try:
         pts = np.asarray(landmarks, dtype=np.float32)

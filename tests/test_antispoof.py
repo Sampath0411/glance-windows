@@ -365,6 +365,51 @@ def _run_verifier(script, frames=8, motion=0.0, liveness="heavy"):
     return result, writer
 
 
+class DesktopLivenessTests(unittest.TestCase):
+    def setUp(self):
+        from glance.desktop.camera import _GateVerifier
+        self.gate = _GateVerifier()
+        self.open = _synthetic_aligned(open_eye=True)
+        self.closed = _synthetic_aligned(open_eye=False)
+        pipeline = _FakePipeline(1, [self.open])
+        self.frame = _synthetic_frame()
+        _, self.face, _ = pipeline.embedding_for(self.frame)
+
+    def observe(self, aligned, name="Sampath"):
+        return self.gate.verify(self.frame, self.face, aligned, name, .9)
+
+    def blink(self):
+        result = None
+        for image in [self.open, self.open, self.closed, self.open]:
+            result = self.observe(image)
+        return result
+
+    def test_static_face_is_withheld_but_blink_releases_match(self):
+        for _ in range(12):
+            self.assertEqual(self.observe(self.open)[0], "")
+        self.assertEqual(self.blink()[0], "Sampath")
+
+    def test_identity_change_cannot_inherit_a_blink(self):
+        self.assertEqual(self.blink()[0], "Sampath")
+        self.assertEqual(self.observe(self.open, "Other")[0], "")
+
+    def test_face_loss_cannot_preserve_a_blink(self):
+        self.assertEqual(self.blink()[0], "Sampath")
+        self.gate.reset_identity()
+        self.assertEqual(self.observe(self.open)[0], "")
+
+    def test_spoof_denial_latches_until_a_new_attempt(self):
+        with patch.object(lv, "extract_screen_glow",
+                          return_value=lv.ScreenSample(240., 2., .98, .001, 200.)):
+            for _ in range(4):
+                self.observe(self.open)
+        self.gate.reset_identity()
+        name, score, hint = self.blink()
+        self.assertEqual(name, "")
+        self.assertEqual(score, 0.)
+        self.assertIn("screen", hint.lower())
+
+
 class AgentIntegrationTests(unittest.TestCase):
     def test_verifier_defaults_to_heavy(self) -> None:
         verifier = glance_agent.Verifier(
@@ -375,6 +420,20 @@ class AgentIntegrationTests(unittest.TestCase):
     def test_static_photo_never_writes_a_grant(self) -> None:
         still = _synthetic_aligned(open_eye=True)
         result, writer = _run_verifier([still])
+        self.assertEqual(result, "denied")
+        self.assertEqual(writer.calls, 0)
+
+    def test_heavy_rejects_landmark_motion_on_a_static_photo(self) -> None:
+        result, writer = _run_verifier(
+            [_synthetic_aligned(open_eye=True)], frames=12, motion=6.0,
+        )
+        self.assertEqual(result, "denied")
+        self.assertEqual(writer.calls, 0)
+
+    def test_diagnostic_light_mode_cannot_authorize_windows_unlock(self) -> None:
+        result, writer = _run_verifier(
+            [_synthetic_aligned(open_eye=True)], liveness="light",
+        )
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
 

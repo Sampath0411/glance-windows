@@ -224,8 +224,8 @@ def main() -> int:
     heavy_out = None
     for _ in range(3):
         heavy_out = ev3b.observe(motion)
-    check("heavy mode accepts movement as proof of life",
-          heavy_out.decision is lv.Decision.CONFIRMED, heavy_out.decision.value)
+    check("heavy mode refuses movement alone",
+          heavy_out.decision is lv.Decision.PENDING, heavy_out.decision.value)
 
     ev3c = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
     strict_out = None

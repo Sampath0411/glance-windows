@@ -219,7 +219,7 @@ def cmd_live(args) -> int:
                     else:
                         live_line = (f"LIVENESS: scanning [{evaluator.mode.value}] "
                                      f"blink {len(openness_history)}  motion {len(motion_history)}"
-                                     "  - blink or move your head")
+                                     "  - look at the camera and blink")
             else:
                 if evaluator is not None:
                     evaluator.reset()  # face lost: this is a new scan
@@ -396,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--liveness", choices=["off", "light", "heavy", "strict"], default="heavy",
-                    help="heavy = block spoofs and require a blink or movement (default); "
+                    help="heavy = spoof checks and a required blink (default); "
                          "strict = require a blink; light = deny cues only (diagnostics)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

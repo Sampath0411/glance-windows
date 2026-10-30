@@ -20,6 +20,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
 from ..core import GlancePipeline
+from .. import liveness as lv
 
 GOOD_FACE_FRACTION = 0.02   # 2% of the frame - a laptop webcam at arm's length
 GOOD_BLUR = 60.0            # variance of the Laplacian
@@ -29,7 +30,7 @@ PREVIEW_MAX_WIDTH = 640
 PREVIEW_INTERVAL = 1 / 12.0
 DETECT_INTERVAL = 0.20      # 5 detections per second while the preview is open
 EMBED_INTERVAL = 1.0        # refresh the name label once a second
-GATE_INTERVAL = 0.5         # in-app face check status twice a second
+GATE_INTERVAL = 0.10        # sample fast enough to observe an eye closure
 
 
 def full_face_in_frame(face, frame_shape) -> bool:
@@ -60,6 +61,54 @@ class FrameInfo:
     hint: str = ""
 
 
+class _GateVerifier:
+    """Per-attempt liveness, bound to one continuously visible identity."""
+
+    def __init__(self):
+        self.evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
+        self.name = ""
+        self.openness = []
+        self.denial = ""
+
+    def reset_identity(self):
+        self.evaluator.reset()
+        self.name = ""
+        self.openness.clear()
+
+    def verify(self, frame, face, aligned, name, score):
+        if self.denial:
+            return "", 0.0, self.denial
+        if not name or aligned is None:
+            self.reset_identity()
+            return "", 0.0, "Center your enrolled face in view"
+        if name != self.name:
+            self.reset_identity()
+            self.name = name
+        distance = lv.interocular_distance(getattr(face, "kps", None))
+        eye = lv.eye_openness(aligned, distance)
+        if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
+            self.openness.append(eye.openness)
+            del self.openness[:-12]
+        else:
+            self.openness.clear()
+        x1, y1, x2, y2 = [int(value) for value in face.bbox]
+        pad = int(.15 * max(x2 - x1, y2 - y1))
+        crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
+        snapshot = self.evaluator.observe(lv.readings(
+            lv.extract_glare(crop),
+            lv.detect_device_rectangle(frame, tuple(face.bbox)),
+            self.openness,
+            lv.extract_screen_glow(frame, tuple(face.bbox)),
+            lv.extract_texture(crop),
+        ))
+        if snapshot.decision is lv.Decision.DENIED:
+            self.denial = snapshot.denial_reason() or "Liveness check failed"
+            return "", 0.0, self.denial
+        if snapshot.decision is lv.Decision.CONFIRMED:
+            return name, score, ""
+        return "", 0.0, "Look at the camera and blink naturally"
+
+
 class CameraWorker(QThread):
     preview = Signal(QImage, object)    # image, FrameInfo
     captured = Signal(object)           # Capture
@@ -79,6 +128,7 @@ class CameraWorker(QThread):
         self._ready = threading.Event()
         self._reload = threading.Event()
         self._gate = threading.Event()
+        self._gate_generation = 0
         self._lock = threading.Lock()
 
     def start(self, priority=QThread.Priority.InheritPriority) -> None:
@@ -116,10 +166,12 @@ class CameraWorker(QThread):
 
     def set_gate(self, active: bool) -> None:
         """Quietly report matches for the in-app face check without capturing."""
-        if active:
-            self._gate.set()
-        else:
-            self._gate.clear()
+        with self._lock:
+            self._gate_generation += 1
+            if active:
+                self._gate.set()
+            else:
+                self._gate.clear()
 
     def gate_active(self) -> bool:
         return self._gate.is_set()
@@ -146,12 +198,18 @@ class CameraWorker(QThread):
         faces: list = []
         label, score = "", 0.0
         last_detect = last_embed = last_preview = last_gate = 0.0
+        gate_generation = -1
+        gate_verifier = _GateVerifier()
 
         try:
             while not self._stop.is_set():
                 with self._lock:
                     index = self._index
                     threshold = self._threshold
+                    generation = self._gate_generation
+                if generation != gate_generation:
+                    gate_verifier = _GateVerifier()
+                    gate_generation = generation
                 pipeline.threshold = threshold
 
                 if camera is None:
@@ -165,6 +223,7 @@ class CameraWorker(QThread):
                         return
 
                 elif opened_index != index:
+                    gate_verifier = _GateVerifier()
                     camera.release()
                     camera = None
                     opened_index = None
@@ -192,7 +251,8 @@ class CameraWorker(QThread):
                 now = time.perf_counter()
                 pending = self._capture.is_set()
 
-                if pending or now - last_detect >= DETECT_INTERVAL:
+                gate_due = self._gate.is_set() and now - last_gate >= GATE_INTERVAL
+                if pending or gate_due or now - last_detect >= DETECT_INTERVAL:
                     faces = pipeline.detector.detect(frame)
                     last_detect = now
 
@@ -215,11 +275,13 @@ class CameraWorker(QThread):
                         label, score = (match[0].name, match[2]) if match else ("", 0.0)
                         last_embed = now
 
-                if self._gate.is_set() and now - last_gate >= GATE_INTERVAL:
+                if gate_due:
                     last_gate = now
                     if not faces:
+                        gate_verifier.reset_identity()
                         self.gate.emit("", 0.0, "No face in view")
                     elif len(faces) > 1:
+                        gate_verifier.reset_identity()
                         self.gate.emit("", 0.0, "Only one face at a time")
                     else:
                         # Embed fresh for every gate result so three stable
@@ -233,7 +295,16 @@ class CameraWorker(QThread):
                                 name, score = match[0].name, match[2]
                         height, width = frame.shape[:2]
                         small = faces[0].area / float(width * height) < GOOD_FACE_FRACTION
-                        self.gate.emit(name, score, "Move closer" if small else "")
+                        if small:
+                            gate_verifier.reset_identity()
+                            result = ("", 0.0, "Move closer")
+                        else:
+                            result = gate_verifier.verify(frame, faces[0], aligned, name, score)
+                        # Discard a result computed for a cancelled/retried scan.
+                        with self._lock:
+                            current = self._gate_generation == gate_generation and self._gate.is_set()
+                        if current:
+                            self.gate.emit(*result)
 
                 if now - last_preview >= PREVIEW_INTERVAL:
                     last_preview = now

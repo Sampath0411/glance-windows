@@ -832,14 +832,14 @@ class SettingsPage(QWidget):
 
         form.addWidget(_title("Proof of life", "h2"))
         self.liveness = SegmentedTiles((
-            ("heavy", "Heavy", "block photos & screens, accept a blink or movement"),
-            ("strict", "Strict", "block photos & screens, require a blink"),
+            ("heavy", "Heavy", "spoof checks and a required blink"),
+            ("strict", "Strict", "required blink (same protection as Heavy)"),
         ))
         form.addWidget(self.liveness)
         self.liveness_note = _muted(
-            "A still photo or a phone screen showing your face cannot blink, so it "
-            "never unlocks. Glare, screen glow, device edges and print patterns fail "
-            "the scan outright. A video replay of you is not detectable by a normal camera."
+            "Look at the camera and blink naturally. Movement alone never authorizes "
+            "unlock. Glare, screen glow, device edges and print patterns are also checked. "
+            "These RGB-camera checks can miss spoofs, including video replays."
         )
         self.liveness_note.setWordWrap(True)
         form.addWidget(self.liveness_note)
@@ -1281,9 +1281,10 @@ class AboutPage(QWidget):
         ))
         content.addWidget(info)
         content.addWidget(_title("Windows sign-in help", "h2"))
-        self.account_status = _muted(
+        account_result = SettingsRow("Check result",
             "Check your sign-in type to see which account name Glance should use."
         )
+        self.account_status = account_result.subtitle
         self.identify_account_button = QPushButton("Check sign-in type")
         self.identify_account_button.clicked.connect(self._identify_account)
         self.check_password_button = QPushButton("Check password")
@@ -1306,7 +1307,7 @@ class AboutPage(QWidget):
             "Windows Hello", "For Microsoft accounts, turn Off the Windows Hello-only sign-in option if needed.",
             self.signin_options_button,
         ))
-        sign_in.add_row(SettingsRow("Check result", "", self.account_status))
+        sign_in.add_row(account_result)
         content.addWidget(sign_in)
         self._account_info = None
         self._account_task: Task | None = None
@@ -1327,10 +1328,11 @@ class AboutPage(QWidget):
         content.addStretch(1)
         self.logs = LogsPage(window)
         self.back_logs = QPushButton("← About")
-        self.back_logs.clicked.connect(lambda: self.pages.setCurrentWidget(self.content))
+        self.back_logs.clicked.connect(lambda: self.pages.setCurrentWidget(self.content_scroll))
         self.logs.layout().itemAt(0).layout().insertWidget(0, self.back_logs)
         self.pages = QStackedWidget()
-        self.pages.addWidget(self.content)
+        self.content_scroll = _scrollable(self.content)
+        self.pages.addWidget(self.content_scroll)
         self.pages.addWidget(self.logs)
         layout.addWidget(self.pages)
 

@@ -231,6 +231,8 @@ class Verifier:
         self.identity = identity
         self.any_identity = any_identity
         self.liveness = lv.LivenessMode.from_name(liveness)
+        if self.liveness is lv.LivenessMode.LIGHT:
+            self.liveness = lv.DEFAULT_MODE  # diagnostics must never authorize grants
         self.paths = paths or resolve_runtime_paths()
 
     def run(self, stop: threading.Event, is_locked=None) -> str:
@@ -370,7 +372,7 @@ class Verifier:
             # A matching still photo reaches this point on every frame. Failing
             # closed is the whole point; say so instead of reporting "no face".
             log(f"denied: no proof of life ({self.liveness.value}) within {self.timeout:.0f}s - "
-                "a still photo cannot blink or move like a face")
+                "no qualifying blink detected")
             outcome = "denied"
         return outcome
 

@@ -343,9 +343,10 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             f"What's new in Glance {__version__}",
-            "Glance now helps identify your Windows account and check your password "
-            "without PowerShell. It can start face monitoring quietly at sign-in and "
-            "recover protection after your PC wakes from sleep.",
+            "Windows unlock and in-app face checks now require a blink. "
+            "Phone movement could previously trigger the micro-motion cue; "
+            "movement alone no longer authorizes access. Look at the camera and "
+            "blink naturally. RGB-camera spoof checks remain imperfect.",
         )
         ui_state.mark_whats_new_shown(__version__)
 
