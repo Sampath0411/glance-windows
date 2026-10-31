@@ -67,13 +67,13 @@ class _GateVerifier:
     def __init__(self):
         self.evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
         self.name = ""
-        self.openness = []
+        self.head_turn_tracker = lv.HeadTurnTracker()
         self.denial = ""
 
     def reset_identity(self):
         self.evaluator.reset()
         self.name = ""
-        self.openness.clear()
+        self.head_turn_tracker.reset()
 
     def verify(self, frame, face, aligned, name, score):
         if self.denial:
@@ -84,29 +84,34 @@ class _GateVerifier:
         if name != self.name:
             self.reset_identity()
             self.name = name
-        distance = lv.interocular_distance(getattr(face, "kps", None))
-        eye = lv.eye_openness(aligned, distance)
-        if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
-            self.openness.append(eye.openness)
-            del self.openness[:-12]
-        else:
-            self.openness.clear()
+        head_turn = self.head_turn_tracker.observe(
+            lv.extract_head_pose_sample(getattr(face, "kps", None))
+        )
         x1, y1, x2, y2 = [int(value) for value in face.bbox]
         pad = int(.15 * max(x2 - x1, y2 - y1))
         crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
         snapshot = self.evaluator.observe(lv.readings(
-            lv.extract_glare(crop),
-            lv.detect_device_rectangle(frame, tuple(face.bbox)),
-            self.openness,
-            lv.extract_screen_glow(frame, tuple(face.bbox)),
-            lv.extract_texture(crop),
+            glare=lv.extract_glare(crop),
+            device=lv.detect_device_rectangle(frame, tuple(face.bbox)),
+            screen=lv.extract_screen_glow(frame, tuple(face.bbox)),
+            texture=lv.extract_texture(crop),
+            head_turn=head_turn,
         ))
         if snapshot.decision is lv.Decision.DENIED:
             self.denial = snapshot.denial_reason() or "Liveness check failed"
             return "", 0.0, self.denial
         if snapshot.decision is lv.Decision.CONFIRMED:
             return name, score, ""
-        return "", 0.0, "Look at the camera and blink naturally"
+        hints = {
+            "baseline": "Face forward to begin",
+            "left": "Turn your head left",
+            "right": "Turn your head right",
+            "return": "Face forward again",
+            "quality": "Move closer and face the camera in steady lighting",
+            "complete": "Head turn complete",
+        }
+        hint = hints.get(self.head_turn_tracker.phase, "Face forward, then turn left and right")
+        return "", 0.0, hint
 
 
 class CameraWorker(QThread):

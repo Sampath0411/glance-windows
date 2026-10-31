@@ -268,13 +268,18 @@ class Verifier:
         history: list[float] = []
         openness_history: list[float] = []
         motion_history: list = []
+        head_turn_tracker = lv.HeadTurnTracker()
+        tracked_identity = ""
         matched_face_seen = False
 
         def reset_scan() -> None:
+            nonlocal tracked_identity
             evaluator.reset()
             history.clear()
             openness_history.clear()
             motion_history.clear()
+            head_turn_tracker.reset()
+            tracked_identity = ""
 
         deadline = time.time() + self.timeout
         outcome = "no-face"
@@ -305,6 +310,9 @@ class Verifier:
                 if not self.any_identity and identity.name != self.identity:
                     reset_scan()
                     continue
+                if identity.name != tracked_identity:
+                    reset_scan()
+                    tracked_identity = identity.name
 
                 matched_face_seen = True
                 history.append(centroid)
@@ -331,10 +339,16 @@ class Verifier:
                     if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
                         openness_history.append(eye.openness)
                         del openness_history[:-12]
+                    head_turn_reading = head_turn_tracker.observe(
+                        lv.extract_head_pose_sample(landmarks)
+                    )
+                else:
+                    head_turn_tracker.reset()
+                    head_turn_reading = lv.CueReading.none()
 
                 snapshot = evaluator.observe(lv.readings(
                     glare, device, openness_history, screen, texture,
-                    motion_history, interocular,
+                    motion_history, interocular, head_turn_reading,
                 ))
 
                 if snapshot.decision is lv.Decision.DENIED:
@@ -372,7 +386,7 @@ class Verifier:
             # A matching still photo reaches this point on every frame. Failing
             # closed is the whole point; say so instead of reporting "no face".
             log(f"denied: no proof of life ({self.liveness.value}) within {self.timeout:.0f}s - "
-                "no qualifying blink detected")
+                "no qualifying head-turn sequence detected")
             outcome = "denied"
         return outcome
 

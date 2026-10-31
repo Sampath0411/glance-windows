@@ -25,7 +25,7 @@ class FaceGateDialog(QDialog):
 
     def __init__(self, parent, purpose: str, camera=None, *,
                  threshold: float | None = None, acquire=None, release=None,
-                 restart=None):
+                 restart=None, password_fallback=None):
         super().__init__(parent)
         self.purpose = purpose
         self.camera = camera if camera is not None else parent.camera
@@ -36,6 +36,7 @@ class FaceGateDialog(QDialog):
         self._acquire = acquire or (lambda: parent.acquire_camera(self.OWNER))
         self._release = release or (lambda: parent.release_camera(self.OWNER))
         self._restart = restart or getattr(parent, "retry_camera", None)
+        self._password_fallback = password_fallback
 
         self._scanning = False
         self._started = False
@@ -87,6 +88,10 @@ class FaceGateDialog(QDialog):
         self.retry.clicked.connect(self._retry)
         self.retry.hide()
         buttons.addWidget(self.retry)
+        self.use_password = QPushButton("Use Windows password")
+        self.use_password.clicked.connect(self._use_password)
+        self.use_password.hide()
+        buttons.addWidget(self.use_password)
         self.cancel = QPushButton("Cancel")
         self.cancel.clicked.connect(self.reject)
         buttons.addWidget(self.cancel)
@@ -159,6 +164,7 @@ class FaceGateDialog(QDialog):
         self._scanning = False
         self._accept_timer.stop()
         self.retry.hide()
+        self.use_password.hide()
         self.cancel.setEnabled(True)
         self.animation.show_state("idle")
         self.status.setStyleSheet("")
@@ -174,7 +180,7 @@ class FaceGateDialog(QDialog):
             return
 
         self._scanning = True
-        self.status.setText("Looking for your face…")
+        self.status.setText("Face forward to begin the head-turn check")
         self._hold_camera()
         self.camera.set_gate(True)
         self._scan_timer.start()
@@ -212,9 +218,9 @@ class FaceGateDialog(QDialog):
 
         self._streak_name = ""
         self._streak = 0
-        self.status.setText("Looking for your face…")
+        self.status.setText("Camera check")
         self.status.setStyleSheet("")
-        self.hint.setText(hint or "Center your face in view")
+        self.hint.setText(hint or "Face forward, then turn left and right")
 
     def _on_camera_failed(self, message: str) -> None:
         if self._scanning:
@@ -229,6 +235,7 @@ class FaceGateDialog(QDialog):
         self.status.setStyleSheet(f"color: {ACCENT};")
         self.hint.setText("")
         self.retry.hide()
+        self.use_password.hide()
         self.cancel.setEnabled(False)
         self._stop_gate()
         self._accept_timer.start(SUCCESS_HOLD_MS)
@@ -241,8 +248,29 @@ class FaceGateDialog(QDialog):
         self.status.setStyleSheet(f"color: {DANGER};")
         self.hint.setText("Keep your face clearly visible and try again." if retry else "")
         self.retry.setVisible(retry)
+        self.use_password.setVisible(self._password_fallback is not None)
         self.cancel.setEnabled(True)
         self._stop_gate()
+
+    def _use_password(self) -> None:
+        if self._scanning or self._password_fallback is None:
+            return
+        self.use_password.setEnabled(False)
+        try:
+            verified = bool(self._password_fallback())
+        except Exception:  # noqa: BLE001 - fallback failure must fail closed
+            verified = False
+        finally:
+            self.use_password.setEnabled(True)
+        if verified:
+            self.animation.show_state("success")
+            self.status.setText("Password verified · opening")
+            self.status.setStyleSheet(f"color: {ACCENT};")
+            self.hint.setText("")
+            self.retry.hide()
+            self.use_password.hide()
+            self.cancel.setEnabled(False)
+            self.accept()
 
     def _stop_gate(self) -> None:
         if self._holding_camera:

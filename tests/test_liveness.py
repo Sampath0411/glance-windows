@@ -233,10 +233,10 @@ def main() -> int:
         strict_out = ev3c.observe(motion)
     check("strict mode refuses movement alone",
           strict_out.decision is lv.Decision.PENDING, strict_out.decision.value)
-    blink = clean_readings()
-    blink[lv.Cue.BLINK] = lv.CueReading(1.0, 1.0)
-    check("strict mode accepts a blink",
-          ev3c.observe(blink).decision is lv.Decision.CONFIRMED)
+    head_turn = clean_readings()
+    head_turn[lv.Cue.HEAD_TURN] = lv.CueReading(1.0, 1.0)
+    check("strict mode accepts the head-turn challenge",
+          ev3c.observe(head_turn).decision is lv.Decision.CONFIRMED)
 
     check("unknown mode falls back to heavy, never off",
           lv.LivenessMode.from_name("off") is lv.LivenessMode.HEAVY)

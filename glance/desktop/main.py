@@ -31,8 +31,8 @@ from .face_gate import FaceGateDialog
 from .models_setup import ModelsDialog
 from .onboarding import FirstRunDialog
 from .pages import (
-    AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog, Task,
-    PasswordPage, RecognitionPage,
+    AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog,
+    PasswordPage, WindowsPasswordFallbackDialog, RecognitionPage, Task,
 )
 from .. import protection_state
 from .recovery import should_recover_agent
@@ -306,7 +306,13 @@ class MainWindow(QMainWindow):
         """
         if not backend.identity_summary(0):
             return True
-        return FaceGateDialog(self, purpose).exec() == QDialog.Accepted
+        return FaceGateDialog(
+            self, purpose,
+            password_fallback=self._request_windows_password_fallback,
+        ).exec() == QDialog.Accepted
+
+    def _request_windows_password_fallback(self) -> bool:
+        return WindowsPasswordFallbackDialog(self).exec() == QDialog.Accepted
 
     def _windows_password_stored(self) -> bool:
         try:
@@ -343,10 +349,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             f"What's new in Glance {__version__}",
-            "Windows unlock and in-app face checks now require a blink. "
-            "Phone movement could previously trigger the micro-motion cue; "
-            "movement alone no longer authorizes access. Look at the camera and "
-            "blink naturally. RGB-camera spoof checks remain imperfect.",
+            "Windows unlock and in-app face checks now prompt a left, right, and "
+            "forward head turn. If it stalls, move closer and use steady front lighting. "
+            "Your Windows password is available as a fallback for in-app face checks. "
+            "RGB head-motion checks are not proof of a live person and may not detect "
+            "photo or video replays.",
         )
         ui_state.mark_whats_new_shown(__version__)
 

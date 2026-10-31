@@ -10,34 +10,23 @@ copying exactly, because it is unusually well thought out:
   * firing is latched per scan, and counting is cumulative not consecutive,
     so a single-frame landmark dropout doesn't reset progress
   * Light mode  = deny only, "confirmed unless proven wrong"  <- diagnostics only
-   * Heavy mode  = deny cues, plus a blink must fire  <- default
-  * Strict mode = deny cues, plus a blink is mandatory
+  * Heavy/Strict = deny cues, plus a forward→left→right→forward head-turn challenge
 
 Implemented deny cues:
   * glossGlare       - one flat specular blob instead of scattered skin glints
   * screenGlow       - a bright, neutral, uniform emissive panel behind the face
-  * deviceDetected   - device-shaped rectangle around the face (bezel inside the
-                       frame), including a phone whose screen edge only partly
-                       encloses a close-up face
+  * deviceDetected   - device-shaped rectangle covering most of or tightly
+                       enclosing the face; partial background overlaps abstain
   * printOrMoire     - periodic high-frequency peaks: display pixel grid / moire
                        or a printed halftone screen
 
 Implemented confirm cues:
-  * blink            - bilateral dip-and-recovery in eye openness, measured from
-                       pixels inside the aligned 112x112 crop. SCRFD only has
-                       five points (no eyelids), and the 106-point index tables
-                       are widely misquoted, so the eye patches are taken from
-                       the fixed ArcFace template positions instead of landmark
-                       indices.
-   * microMotion      - diagnostic variation of landmark distance ratios only.
-                        Detector jitter and perspective changes on a phone can
-                        trigger it, so it is never authorization evidence.
+  * headTurn          - ordered relative pose change: forward, left, right, forward
+  * blink/microMotion - retained for diagnostics only; never authorization cues
 
-Deliberately abstaining:
-  * flatVs3D, depthPose - these need a reliable head-yaw source. Glance gets yaw
-    free from Vision's VNFaceObservation. There is no equivalent here, and
-    deriving yaw from the nose offset it is then correlated against would make
-    the cue trivially self-confirming. An honest abstention beats a fake pass.
+Head pose limitation:
+  * The SCRFD landmark yaw proxy can guide this prompted challenge but cannot
+    provide calibrated 3D pose or prove physical presence.
 
 Known limit: these RGB-camera heuristics are not proof of physical presence.
 Video replay, illumination changes, and alignment errors can fool pixel cues.
@@ -53,11 +42,13 @@ from enum import Enum
 import cv2
 import numpy as np
 
-SMILE_BASELINE_SAMPLES = 4
-SMILE_ONSET_SAMPLES = 3
-SMILE_RELAX_SAMPLES = 3
-SMILE_MIN_WIDTH_CHANGE = 0.10
-SMILE_RELAX_WIDTH_CHANGE = 0.045
+HEAD_TURN_BASELINE_SAMPLES = 4
+HEAD_TURN_SAMPLES = 3
+HEAD_TURN_RETURN_SAMPLES = 3
+HEAD_TURN_MIN_DELTA = 0.12
+HEAD_TURN_CENTER_TOLERANCE = 0.055
+HEAD_TURN_MAX_BASELINE_OFFSET = 0.12
+MIN_HEAD_POSE_CONFIDENCE = 0.35
 
 # --------------------------------------------------------------------------- #
 # cue vocabulary - mirrors LivenessCues.swift
@@ -75,6 +66,7 @@ class Cue(Enum):
     FLAT_VS_3D = "flatVs3D"
     DEPTH_POSE = "depthPose"
     BLINK = "blink"
+    HEAD_TURN = "headTurn"
     MICRO_MOTION = "microMotion"
 
     @property
@@ -93,6 +85,7 @@ class Cue(Enum):
             Cue.FLAT_VS_3D: "Flat vs 3D",
             Cue.DEPTH_POSE: "Depth/pose",
             Cue.BLINK: "Blink",
+            Cue.HEAD_TURN: "Head turn",
             Cue.MICRO_MOTION: "Micro-motion",
         }[self]
 
@@ -147,6 +140,7 @@ class LivenessTuning:
     depth_pose_level: float = 0.8
     depth_pose_frames: int = 2
     blink_frames: int = 1
+    head_turn_frames: int = 1
     motion_level: float = 0.60
     motion_frames: int = 3
     light_mode_minimum_frames: int = 3
@@ -160,6 +154,7 @@ class LivenessTuning:
             Cue.FLAT_VS_3D: self.flat_vs_3d_level,
             Cue.DEPTH_POSE: self.depth_pose_level,
             Cue.BLINK: 0.5,
+            Cue.HEAD_TURN: 0.5,
             Cue.MICRO_MOTION: self.motion_level,
         }[cue]
 
@@ -172,6 +167,7 @@ class LivenessTuning:
             Cue.FLAT_VS_3D: self.flat_vs_3d_frames,
             Cue.DEPTH_POSE: self.depth_pose_frames,
             Cue.BLINK: self.blink_frames,
+            Cue.HEAD_TURN: self.head_turn_frames,
             Cue.MICRO_MOTION: self.motion_frames,
         }[cue]
 
@@ -207,20 +203,20 @@ class Snapshot:
         if self.decision is not Decision.DENIED:
             return None
         if self.denied_by is Cue.GLOSS_GLARE:
-            return "Screen glare detected - this looks like a photo on a display."
+            return "Possible glare in the face area. Adjust the camera angle or lighting, then retry."
         if self.denied_by is Cue.SCREEN_GLOW:
-            return "A bright emissive screen was detected around the face - photo on a phone or monitor."
+            return "Screen-glow cue: the area around your face looks unusually bright. Adjust lighting or reposition, then retry."
         if self.denied_by is Cue.DEVICE_DETECTED:
-            return "A device-shaped rectangle was detected around the face - photo or screen."
+            return "A rectangular edge near the face confused the camera check. Reposition and retry."
         if self.denied_by is Cue.PRINT_OR_MOIRE:
-            return "A screen or print pattern was detected - this face is not three-dimensional."
+            return "The face image has an unusual repeating texture. Change distance or lighting, then retry."
         return "Liveness check failed."
 
     def waiting_reason(self) -> str:
         """Describe the required proof of life for user-facing logs."""
         if self.decision is Decision.CONFIRMED:
             return "confirmed"
-        return "no blink seen yet"
+        return "waiting for forward → left → right → forward head turn"
 
 
 class LivenessEvaluator:
@@ -263,11 +259,8 @@ class LivenessEvaluator:
             if self.mode is LivenessMode.LIGHT:
                 if self.frames_observed >= self.tuning.light_mode_minimum_frames:
                     decision = Decision.CONFIRMED
-            else:
-                # Landmark motion is diagnostic only: detector jitter and a
-                # tilted phone can change these ratios without a live face.
-                if Cue.BLINK in self.enabled_cues and self.states[Cue.BLINK].has_fired:
-                    decision, confirmed_by = Decision.CONFIRMED, Cue.BLINK
+            elif Cue.HEAD_TURN in self.enabled_cues and self.states[Cue.HEAD_TURN].has_fired:
+                decision, confirmed_by = Decision.CONFIRMED, Cue.HEAD_TURN
 
         return Snapshot(decision, denied_by, confirmed_by, self.states, self.frames_observed)
 
@@ -444,7 +437,11 @@ def detect_device_rectangle(frame_bgr: np.ndarray,
             and face_height / float(bh) >= 0.18
             and 0.5 <= area / face_area <= 4.0
         )
-        if (area >= min_area and overlap > 0.0
+        # A rectangle merely crossing the face often comes from a window,
+        # picture frame, shelf, or cabinet behind a real user. Require the
+        # candidate to cover nearly all of the face; otherwise only accept a
+        # tight enclosing rectangle with explicit face-relative geometry.
+        if (area >= min_area and overlap >= 0.80
                 and area / face_area <= MAX_DEVICE_FACE_RATIO):
             level = float(min(max(overlap, 0.0), 1.0))
             score = overlap * 10.0 + area / frame_area
@@ -672,93 +669,102 @@ class EyeSample:
 
 
 @dataclass(frozen=True)
-class SmileSample:
-    """Mouth-corner width relative to eye spacing; confidence is image/pose quality."""
+class HeadPoseSample:
+    """Eye-axis nose offset normalized by eye spacing; not physical yaw."""
 
-    width_ratio: float
+    yaw: float
     confidence: float
 
 
-def extract_smile_sample(aligned_bgr: np.ndarray, landmarks) -> SmileSample | None:
-    """Measure normalized mouth width from SCRFD's five facial landmarks.
+def extract_head_pose_sample(landmarks, *, mirrored: bool = False) -> HeadPoseSample | None:
+    """Estimate a relative yaw proxy from SCRFD's five facial landmarks.
 
-    A sample is rejected when the aligned crop is unusable, the face is too
-    small, or the face geometry is strongly non-frontal. This is a challenge
-    measurement, not a standalone smile classifier.
+    The signed nose offset is projected onto the eye axis, which removes face
+    translation and in-plane roll, then normalized by interocular distance.
+    It is suitable for guiding a temporal head-turn challenge, not as a metric
+    pose estimate or proof of physical presence.
     """
-    if aligned_bgr is None or aligned_bgr.size == 0 or min(aligned_bgr.shape[:2]) < 64:
-        return None
     try:
         points = np.asarray(landmarks, dtype=np.float32)
     except (TypeError, ValueError):
         return None
-    if points.ndim != 2 or points.shape[0] < 5 or points.shape[1] != 2:
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
         return None
-    if not np.isfinite(points[:5]).all():
+    if not np.isfinite(points[:3]).all():
         return None
-    left_eye, right_eye, nose, left_mouth, right_mouth = points[:5]
-    eye_width = float(np.linalg.norm(right_eye - left_eye))
-    mouth_width = float(np.linalg.norm(right_mouth - left_mouth))
-    if eye_width < 18.0 or mouth_width < eye_width * 0.25 or mouth_width > eye_width * 1.35:
+    left_eye, right_eye, nose = points[:3]
+    eye_vector = right_eye - left_eye
+    eye_width = float(np.linalg.norm(eye_vector))
+    if eye_width < 18.0:
         return None
-    eye_center = (left_eye + right_eye) / 2.0
-    mouth_center = (left_mouth + right_mouth) / 2.0
-    eye_mid = float(eye_center[0])
-    if abs(float(nose[0]) - eye_mid) / eye_width > 0.30:
+    eye_axis = eye_vector / eye_width
+    eye_center = (left_eye + right_eye) * 0.5
+    nose_offset = float(np.dot(nose - eye_center, eye_axis)) / eye_width
+    if mirrored:
+        nose_offset = -nose_offset
+    if not np.isfinite(nose_offset) or abs(nose_offset) > 0.45:
         return None
-    if not 0.50 <= float(mouth_center[1] - eye_center[1]) / eye_width <= 1.65:
-        return None
-    gray = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY)
-    mean_luma = float(gray.mean())
-    if not 18.0 <= mean_luma <= 245.0:
-        return None
-    return SmileSample(mouth_width / eye_width, _ramp(eye_width, 18.0, 42.0))
+    return HeadPoseSample(
+        nose_offset,
+        _ramp(eye_width, 18.0, 42.0),
+    )
 
 
-class SmileTracker:
-    """Require an observed neutral→smile→relax transition within one scan."""
+class HeadTurnTracker:
+    """Require forward → left → right → forward pose changes within one scan."""
 
     def __init__(self):
         self._baseline: list[float] = []
-        self._onset = 0
-        self._relax = 0
+        self._phase_samples = 0
+        self._baseline_yaw = 0.0
         self.confirmed = False
+        self.phase = "baseline"
 
     def reset(self) -> None:
         self._baseline.clear()
-        self._onset = 0
-        self._relax = 0
+        self._phase_samples = 0
+        self._baseline_yaw = 0.0
         self.confirmed = False
+        self.phase = "baseline"
 
-    def observe(self, sample: SmileSample | None) -> "CueReading":
+    def observe(self, sample: HeadPoseSample | None) -> CueReading:
         if self.confirmed:
             return CueReading(1.0, 1.0)
-        if sample is None or sample.confidence < MIN_OPENNESS_CONFIDENCE:
+        if (sample is None or not np.isfinite(sample.yaw) or
+                not np.isfinite(sample.confidence) or
+                sample.confidence < MIN_HEAD_POSE_CONFIDENCE):
             self.reset()
+            self.phase = "quality"
             return CueReading.none()
-        width = float(sample.width_ratio)
-        if not np.isfinite(width):
-            self.reset()
+
+        if self.phase == "baseline":
+            self._baseline.append(float(sample.yaw))
+            if len(self._baseline) >= HEAD_TURN_BASELINE_SAMPLES:
+                self._baseline_yaw = float(np.median(self._baseline))
+                if abs(self._baseline_yaw) > HEAD_TURN_MAX_BASELINE_OFFSET:
+                    self._baseline.clear()
+                    return CueReading.none()
+                self.phase = "left"
             return CueReading.none()
-        if len(self._baseline) < SMILE_BASELINE_SAMPLES:
-            self._baseline.append(width)
-            return CueReading.none()
-        baseline = float(np.median(self._baseline))
-        if self._onset < SMILE_ONSET_SAMPLES:
-            if width >= baseline + SMILE_MIN_WIDTH_CHANGE:
-                self._onset += 1
-            else:
-                self._onset = 0
-                self._baseline.append(width)
-                del self._baseline[:-SMILE_BASELINE_SAMPLES]
-            return CueReading.none()
-        if width <= baseline + SMILE_RELAX_WIDTH_CHANGE:
-            self._relax += 1
-            if self._relax >= SMILE_RELAX_SAMPLES:
+
+        delta = float(sample.yaw) - self._baseline_yaw
+        if self.phase == "left":
+            self._phase_samples = self._phase_samples + 1 if delta <= -HEAD_TURN_MIN_DELTA else 0
+            if self._phase_samples >= HEAD_TURN_SAMPLES:
+                self.phase = "right"
+                self._phase_samples = 0
+        elif self.phase == "right":
+            self._phase_samples = self._phase_samples + 1 if delta >= HEAD_TURN_MIN_DELTA else 0
+            if self._phase_samples >= HEAD_TURN_SAMPLES:
+                self.phase = "return"
+                self._phase_samples = 0
+        elif self.phase == "return":
+            self._phase_samples = (self._phase_samples + 1
+                                   if abs(delta) <= HEAD_TURN_CENTER_TOLERANCE else 0)
+            if self._phase_samples >= HEAD_TURN_RETURN_SAMPLES:
                 self.confirmed = True
+                self.phase = "complete"
                 return CueReading(1.0, 1.0)
-        else:
-            self._relax = 0
         return CueReading.none()
 
 
@@ -920,7 +926,8 @@ def readings(glare: GlareSample | None = None,
              screen: ScreenSample | None = None,
              texture: TextureSample | None = None,
              motion_history: list[np.ndarray] | None = None,
-             interocular_px: float = 0.0) -> dict[Cue, CueReading]:
+             interocular_px: float = 0.0,
+              head_turn: CueReading | None = None) -> dict[Cue, CueReading]:
     return {
         Cue.GLOSS_GLARE: gloss_glare_reading(glare),
         Cue.SCREEN_GLOW: _gate(screen_glow_reading(screen), MIN_SCREEN_CONFIDENCE),
@@ -930,5 +937,6 @@ def readings(glare: GlareSample | None = None,
         Cue.FLAT_VS_3D: CueReading.none(),
         Cue.DEPTH_POSE: CueReading.none(),
         Cue.BLINK: blink_reading(openness_history or []),
+        Cue.HEAD_TURN: head_turn or CueReading.none(),
         Cue.MICRO_MOTION: micro_motion_reading(motion_history, interocular_px),
     }

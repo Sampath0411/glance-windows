@@ -60,19 +60,31 @@ class ModeTests(unittest.TestCase):
             snapshot = ev.observe(clean_readings())
         self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
 
-    def test_strict_ignores_motion_and_requires_blink(self) -> None:
+    def test_strict_ignores_motion_and_blink(self) -> None:
         ev = evaluator(lv.LivenessMode.STRICT)
         motion = lv.CueReading(1.0, 1.0)
         for _ in range(6):
-            snapshot = ev.observe(clean_readings({lv.Cue.MICRO_MOTION: motion}))
+            snapshot = ev.observe(clean_readings({
+                lv.Cue.MICRO_MOTION: motion,
+                lv.Cue.BLINK: motion,
+            }))
         self.assertIs(snapshot.decision, lv.Decision.PENDING)
 
-    def test_strict_confirms_on_blink(self) -> None:
+    def test_heavy_and_strict_confirm_on_head_turn(self) -> None:
         ev = evaluator(lv.LivenessMode.STRICT)
-        blink = lv.CueReading(1.0, 1.0)
-        snapshot = ev.observe(clean_readings({lv.Cue.BLINK: blink}))
+        head_turn = lv.CueReading(1.0, 1.0)
+        snapshot = ev.observe(clean_readings({lv.Cue.HEAD_TURN: head_turn}))
         self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
-        self.assertIs(snapshot.confirmed_by, lv.Cue.BLINK)
+        self.assertIs(snapshot.confirmed_by, lv.Cue.HEAD_TURN)
+
+        ev = evaluator(lv.LivenessMode.HEAVY)
+        snapshot = ev.observe(clean_readings({lv.Cue.HEAD_TURN: head_turn}))
+        self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
+
+    def test_waiting_reason_names_head_turn_challenge(self) -> None:
+        snapshot = evaluator(lv.LivenessMode.HEAVY).observe(clean_readings())
+        self.assertIn("left", snapshot.waiting_reason())
+        self.assertIn("right", snapshot.waiting_reason())
 
     def test_every_deny_cue_overrides_blink(self) -> None:
         deny_cues = [cue for cue in lv.Cue if cue.role is lv.CueRole.DENY]
@@ -84,7 +96,7 @@ class ModeTests(unittest.TestCase):
                 frames = max(borrowed.frames(c) for c in deny_cues)
                 snapshot = None
                 for _ in range(frames + 1):
-                    snapshot = ev.observe(clean_readings({lv.Cue.BLINK: lv.CueReading(1.0, 1.0), cue: lv.CueReading(1.0, 1.0)}))
+                    snapshot = ev.observe(clean_readings({lv.Cue.HEAD_TURN: lv.CueReading(1.0, 1.0), cue: lv.CueReading(1.0, 1.0)}))
                 self.assertIs(snapshot.decision, lv.Decision.DENIED)
                 self.assertIs(snapshot.denied_by, cue)
                 self.assertTrue(snapshot.denial_reason())
@@ -129,41 +141,87 @@ class BlinkTests(unittest.TestCase):
         self.assertLess(sample.confidence, lv.MIN_OPENNESS_CONFIDENCE)
 
 
-class SmileTrackerTests(unittest.TestCase):
+class HeadTurnTrackerTests(unittest.TestCase):
     @staticmethod
-    def feed(tracker, values, confidence=1.0):
+    def feed(tracker, yaw_values, confidence=1.0):
         reading = lv.CueReading.none()
-        for value in values:
-            reading = tracker.observe(lv.SmileSample(value, confidence))
+        for yaw in yaw_values:
+            reading = tracker.observe(lv.HeadPoseSample(yaw, confidence))
         return reading
 
-    def test_neutral_smile_relax_sequence_confirms(self):
-        tracker = lv.SmileTracker()
-        self.feed(tracker, [.60] * 4)
-        self.feed(tracker, [.78] * 3)
-        reading = self.feed(tracker, [.62] * 3)
+    def test_forward_left_right_forward_sequence_confirms(self):
+        tracker = lv.HeadTurnTracker()
+        self.feed(tracker, [0.0] * 4)
+        self.assertEqual(tracker.phase, "left")
+        self.feed(tracker, [-0.18] * 3)
+        self.assertEqual(tracker.phase, "right")
+        self.feed(tracker, [0.18] * 3)
+        self.assertEqual(tracker.phase, "return")
+        reading = self.feed(tracker, [0.0] * 3)
         self.assertEqual(reading, lv.CueReading(1.0, 1.0))
+        self.assertEqual(tracker.phase, "complete")
 
-    def test_static_smiling_photo_does_not_confirm(self):
-        tracker = lv.SmileTracker()
-        reading = self.feed(tracker, [.78] * 12)
-        self.assertEqual(reading.confidence, 0.0)
+    def test_each_turn_requires_three_stable_observations(self):
+        tracker = lv.HeadTurnTracker()
+        self.feed(tracker, [0.0] * 4)
+        self.feed(tracker, [-0.18] * 2)
+        self.assertEqual(tracker.phase, "left")
+        self.feed(tracker, [-0.18])
+        self.assertEqual(tracker.phase, "right")
 
-    def test_neutral_face_and_small_changes_do_not_confirm(self):
-        tracker = lv.SmileTracker()
-        self.feed(tracker, [.60, .61, .60, .62] * 3)
+    def test_static_pose_and_wrong_turn_order_do_not_confirm(self):
+        static = lv.HeadTurnTracker()
+        self.feed(static, [0.0] * 20)
+        self.assertFalse(static.confirmed)
+
+        wrong_order = lv.HeadTurnTracker()
+        self.feed(wrong_order, [0.0] * 4)
+        self.feed(wrong_order, [0.18] * 3)
+        self.feed(wrong_order, [-0.18] * 3)
+        self.feed(wrong_order, [0.0] * 4)
+        self.assertFalse(wrong_order.confirmed)
+
+    def test_off_center_initial_pose_must_return_forward_before_challenge(self):
+        tracker = lv.HeadTurnTracker()
+        self.feed(tracker, [0.18] * 4)
+        self.assertEqual(tracker.phase, "baseline")
+        self.feed(tracker, [0.0] * 4)
+        self.assertEqual(tracker.phase, "left")
+
+    def test_small_yaw_and_low_quality_sample_do_not_confirm(self):
+        tracker = lv.HeadTurnTracker()
+        self.feed(tracker, [0.0] * 4)
+        self.feed(tracker, [-0.03] * 4)
+        self.assertEqual(tracker.phase, "left")
+        tracker.observe(lv.HeadPoseSample(-0.2, 0.0))
+        self.assertEqual(tracker.phase, "quality")
         self.assertFalse(tracker.confirmed)
 
-    def test_low_quality_sample_resets_sequence(self):
-        tracker = lv.SmileTracker()
-        self.feed(tracker, [.60] * 4)
-        tracker.observe(lv.SmileSample(.80, 0.0))
-        self.assertFalse(tracker.confirmed)
+    def test_pose_extraction_uses_normalized_nose_offset(self):
+        forward = np.array([[40, 50], [80, 50], [60, 70],
+                            [48, 90], [72, 90]], dtype=np.float32)
+        turned = forward.copy()
+        turned[2, 0] -= 8.0
+        forward_sample = lv.extract_head_pose_sample(forward)
+        turned_sample = lv.extract_head_pose_sample(turned)
+        self.assertIsNotNone(forward_sample)
+        self.assertIsNotNone(turned_sample)
+        self.assertAlmostEqual(forward_sample.yaw, 0.0, places=5)
+        self.assertLess(turned_sample.yaw, -0.15)
 
-    def test_smile_measurement_rejects_bad_landmark_geometry(self):
-        aligned = _synthetic_aligned(open_eye=True)
-        bad = np.zeros((5, 2), dtype=np.float32)
-        self.assertIsNone(lv.extract_smile_sample(aligned, bad))
+    def test_mirrored_pose_extraction_reverses_left_right_sign(self):
+        turned = np.array([[40, 50], [80, 50], [52, 70],
+                           [48, 90], [72, 90]], dtype=np.float32)
+        normal = lv.extract_head_pose_sample(turned)
+        mirrored = lv.extract_head_pose_sample(turned, mirrored=True)
+        self.assertAlmostEqual(normal.yaw, -mirrored.yaw, places=5)
+
+    def test_pose_extraction_rejects_invalid_landmarks(self):
+        self.assertIsNone(lv.extract_head_pose_sample(None))
+        self.assertIsNone(lv.extract_head_pose_sample(np.zeros((5, 2), dtype=np.float32)))
+        invalid = np.array([[40, 50], [80, 50], [np.nan, 70],
+                            [48, 90], [72, 90]], dtype=np.float32)
+        self.assertIsNone(lv.extract_head_pose_sample(invalid))
 
 
 class MotionTests(unittest.TestCase):
@@ -277,6 +335,13 @@ class DeviceTests(unittest.TestCase):
         observation = lv.detect_device_rectangle(frame, face)
         self.assertIsNone(observation.rectangle)
 
+    def test_background_rectangle_crossing_face_edge_is_not_a_device(self) -> None:
+        frame = np.full((480, 640, 3), 70, dtype=np.uint8)
+        cv2.rectangle(frame, (330, 120), (540, 360), (220, 220, 220), 12)
+        face = (270.0, 160.0, 370.0, 330.0)
+        observation = lv.detect_device_rectangle(frame, face)
+        self.assertIsNone(observation.rectangle)
+
 
 class SettingsTests(unittest.TestCase):
     def test_liveness_defaults_to_heavy(self) -> None:
@@ -348,15 +413,19 @@ def _synthetic_frame(size: int = 320) -> np.ndarray:
 class _FakePipeline:
     """Feeds the real cue extractors a controlled sequence of frames."""
 
-    def __init__(self, frames: int, script, motion: float = 0.0) -> None:
+    def __init__(self, frames: int, script, motion: float = 0.0, head_turn_series=None,
+                 identity_series=None) -> None:
         self.camera = _FakeCamera(frames)
         self.script = script
         self.motion = motion
+        self.head_turn_series = head_turn_series
+        self.identity_series = identity_series
         self.calls = 0
         self.person = SimpleNamespace(name="Sampath")
+        self.current_person = self.person
         self.store = SimpleNamespace(
             identities=[self.person],
-            best_match=lambda embedding, threshold: (self.person, 0.9, 0.9),
+            best_match=lambda embedding, threshold: (self.current_person, 0.9, 0.9),
         )
 
     def open_camera(self, index: int = 0):
@@ -365,8 +434,18 @@ class _FakePipeline:
     def embedding_for(self, frame):
         index = min(self.calls, len(self.script) - 1)
         self.calls += 1
+        if self.identity_series:
+            name = self.identity_series[min(self.calls - 1, len(self.identity_series) - 1)]
+            if name != self.person.name:
+                self.current_person = SimpleNamespace(name=name)
+                self.store.identities.append(self.current_person)
+            else:
+                self.current_person = self.person
         kps = np.array([[120.0, 110.0], [180.0, 110.0], [150.0, 145.0],
                         [130.0, 180.0], [170.0, 180.0]], dtype=np.float32)
+        if self.head_turn_series:
+            yaw = self.head_turn_series[min(self.calls - 1, len(self.head_turn_series) - 1)]
+            kps[2, 0] = 150.0 + yaw * 60.0
         if self.motion:
             offset = self.motion * np.sin(self.calls * 1.1)
             kps[3, 0] -= offset
@@ -379,9 +458,10 @@ class _FakePipeline:
         raise AssertionError("the fake pipeline is only used by the verifier")
 
 
-def _run_verifier(script, frames=8, motion=0.0, liveness="heavy"):
+def _run_verifier(script, frames=8, motion=0.0, liveness="heavy", head_turn_series=None,
+                  identity_series=None, any_identity=False):
     stop = threading.Event()
-    pipeline = _FakePipeline(frames, script, motion)
+    pipeline = _FakePipeline(frames, script, motion, head_turn_series, identity_series)
     pipeline.camera.stop = stop
     writer = SimpleNamespace(calls=0)
 
@@ -396,7 +476,7 @@ def _run_verifier(script, frames=8, motion=0.0, liveness="heavy"):
         patch.object(glance_agent, "log"),
     ):
         result = glance_agent.Verifier(
-            identity="Sampath", any_identity=False, require_stable=1,
+            identity="Sampath", any_identity=any_identity, require_stable=1,
             timeout=5.0, liveness=liveness, paths=paths,
         ).run(stop)
     return result, writer
@@ -412,26 +492,28 @@ class DesktopLivenessTests(unittest.TestCase):
         self.frame = _synthetic_frame()
         _, self.face, _ = pipeline.embedding_for(self.frame)
 
-    def observe(self, aligned, name="Sampath"):
+    def observe(self, aligned, name="Sampath", yaw=0.0):
+        self.face.kps[2, 0] = 150.0 + yaw * 60.0
         return self.gate.verify(self.frame, self.face, aligned, name, .9)
 
-    def blink(self):
+    def head_turn(self):
         result = None
-        for image in [self.open, self.open, self.closed, self.open]:
-            result = self.observe(image)
+        for yaw, count in ((0.0, 4), (-.18, 3), (.18, 3), (0.0, 3)):
+            for _ in range(count):
+                result = self.observe(self.open, yaw=yaw)
         return result
 
-    def test_static_face_is_withheld_but_blink_releases_match(self):
+    def test_static_face_is_withheld_but_head_turn_releases_match(self):
         for _ in range(12):
             self.assertEqual(self.observe(self.open)[0], "")
-        self.assertEqual(self.blink()[0], "Sampath")
+        self.assertEqual(self.head_turn()[0], "Sampath")
 
-    def test_identity_change_cannot_inherit_a_blink(self):
-        self.assertEqual(self.blink()[0], "Sampath")
+    def test_identity_change_cannot_inherit_a_head_turn(self):
+        self.assertEqual(self.head_turn()[0], "Sampath")
         self.assertEqual(self.observe(self.open, "Other")[0], "")
 
-    def test_face_loss_cannot_preserve_a_blink(self):
-        self.assertEqual(self.blink()[0], "Sampath")
+    def test_face_loss_cannot_preserve_a_head_turn(self):
+        self.assertEqual(self.head_turn()[0], "Sampath")
         self.gate.reset_identity()
         self.assertEqual(self.observe(self.open)[0], "")
 
@@ -441,7 +523,7 @@ class DesktopLivenessTests(unittest.TestCase):
             for _ in range(4):
                 self.observe(self.open)
         self.gate.reset_identity()
-        name, score, hint = self.blink()
+        name, score, hint = self.head_turn()
         self.assertEqual(name, "")
         self.assertEqual(score, 0.)
         self.assertIn("screen", hint.lower())
@@ -453,6 +535,34 @@ class AgentIntegrationTests(unittest.TestCase):
             identity="Sampath", paths=SimpleNamespace(identities_path=Path("x")),
         )
         self.assertIs(verifier.liveness, lv.LivenessMode.HEAVY)
+
+    def test_static_photo_with_landmark_jitter_does_not_grant(self):
+        result, writer = _run_verifier(
+            [_synthetic_aligned(open_eye=True)], frames=12, motion=6.0,
+        )
+        self.assertEqual(result, "denied")
+        self.assertEqual(writer.calls, 0)
+
+    def test_forward_left_right_forward_sequence_grants(self):
+        yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
+        script = [_synthetic_aligned(True)] * len(yaws)
+        result, writer = _run_verifier(
+            script, frames=len(yaws),
+            head_turn_series=yaws,
+        )
+        self.assertEqual(result, "granted")
+        self.assertEqual(writer.calls, 1)
+
+    def test_identity_change_resets_head_turn_progress(self):
+        yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
+        identities = ["Sampath"] * 7 + ["Anu"] * 6
+        script = [_synthetic_aligned(True)] * len(yaws)
+        result, writer = _run_verifier(
+            script, frames=len(yaws), head_turn_series=yaws,
+            identity_series=identities, any_identity=True,
+        )
+        self.assertNotEqual(result, "granted")
+        self.assertEqual(writer.calls, 0)
 
     def test_static_photo_never_writes_a_grant(self) -> None:
         still = _synthetic_aligned(open_eye=True)
@@ -482,24 +592,16 @@ class AgentIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
 
-    def test_blink_sequence_unlocks(self) -> None:
-        open_eye = _synthetic_aligned(open_eye=True)
-        closed_eye = _synthetic_aligned(open_eye=False)
-        script = [open_eye, open_eye, closed_eye, open_eye, open_eye, open_eye]
-        result, writer = _run_verifier(script, frames=6)
-        self.assertEqual(result, "granted")
-        self.assertEqual(writer.calls, 1)
-
-    def test_strict_refuses_movement_but_accepts_a_blink(self) -> None:
+    def test_strict_refuses_movement_but_accepts_head_turn(self) -> None:
         still = _synthetic_aligned(open_eye=True)
         result, writer = _run_verifier([still], frames=12, motion=6.0, liveness="strict")
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
 
-        open_eye = _synthetic_aligned(open_eye=True)
-        closed_eye = _synthetic_aligned(open_eye=False)
-        script = [open_eye, open_eye, closed_eye, open_eye, open_eye, open_eye]
-        result, writer = _run_verifier(script, frames=6, liveness="strict")
+        yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
+        script = [_synthetic_aligned(True)] * len(yaws)
+        result, writer = _run_verifier(script, frames=len(yaws), liveness="strict",
+                                       head_turn_series=yaws)
         self.assertEqual(result, "granted")
         self.assertEqual(writer.calls, 1)
 

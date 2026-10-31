@@ -589,6 +589,15 @@ class SettingsIdentityTests(unittest.TestCase):
             page.load()
         return page
 
+    def test_proof_of_life_prompt_describes_head_turn_challenge(self) -> None:
+        page = self.make_page("Sampath")
+        note = page.liveness_note.text().lower()
+        self.assertIn("head left", note)
+        self.assertIn("turn right", note)
+        self.assertIn("face forward", note)
+        self.assertIn("replay", note)
+        self.assertNotIn("smile", note)
+
     def test_anyone_enrolled_is_the_default_scope(self) -> None:
         page = self.make_page("", any_identity=True)
         self.assertEqual(page.identity.currentData(), "")
@@ -820,7 +829,7 @@ class FaceGateTests(unittest.TestCase):
             self.gate_enabled = active
             self.gate_calls.append(active)
 
-    def make_dialog(self, camera, threshold: float = 0.60):
+    def make_dialog(self, camera, threshold: float = 0.60, password_fallback=None):
         events: list = []
         parent = QWidget()
         dialog = FaceGateDialog(
@@ -828,6 +837,7 @@ class FaceGateTests(unittest.TestCase):
             acquire=lambda: events.append("acquire"),
             release=lambda: events.append("release"),
             restart=lambda owner: events.append(("restart", owner)),
+            password_fallback=password_fallback,
         )
         self.addCleanup(parent.deleteLater)
         self.addCleanup(dialog.close)
@@ -861,8 +871,23 @@ class FaceGateTests(unittest.TestCase):
             self.assertEqual(dialog.result(), QDialog.Accepted)
         self.assertEqual(dialog.matched_name, "Sampath")
         self.assertEqual(dialog.animation.state, "success")
+        self.assertTrue(dialog.use_password.isHidden())
         self.assertFalse(camera.gate_enabled)
         self.assertEqual(events, ["acquire", "release"])
+
+    def test_scan_displays_head_turn_phase_and_cue_specific_guidance(self) -> None:
+        camera = self.FakeCamera()
+        dialog, _events, _parent = self.make_dialog(camera)
+        self.show_dialog(dialog)
+        self.assertIn("face forward", dialog.status.text().lower())
+        camera.gate.emit("", 0.0, "Turn left")
+        self.assertEqual(dialog.hint.text(), "Turn left")
+        camera.gate.emit("", 0.0, "Turn right")
+        self.assertEqual(dialog.hint.text(), "Turn right")
+        camera.gate.emit("", 0.0,
+                         "A rectangular edge near the face confused the camera check. Reposition and retry.")
+        self.assertIn("reposition", dialog.hint.text().lower())
+        self.assertNotIn("photo", dialog.hint.text().lower())
 
     def test_a_low_score_or_a_different_face_breaks_the_streak(self) -> None:
         camera = self.FakeCamera()
@@ -891,11 +916,12 @@ class FaceGateTests(unittest.TestCase):
 
     def test_timeout_fails_then_retry_scans_again(self) -> None:
         camera = self.FakeCamera()
-        dialog, events, _parent = self.make_dialog(camera)
+        dialog, events, _parent = self.make_dialog(camera, password_fallback=lambda: False)
         with patch.object(face_gate, "SUCCESS_HOLD_MS", 0):
             self.show_dialog(dialog, timeout=0.08)
             self.assertTrue(wait_for(lambda: not dialog.is_scanning()))
             self.assertTrue(dialog.retry_visible())
+            self.assertTrue(dialog.use_password.isVisible())
             self.assertIn("verify", dialog.status.text().lower())
             self.assertFalse(camera.gate_enabled)
             self.assertEqual(events, ["acquire", "release"])
@@ -916,12 +942,38 @@ class FaceGateTests(unittest.TestCase):
                 self.assertEqual(dialog.result(), QDialog.Accepted)
         self.assertEqual(dialog.matched_name, "Sampath")
 
+    def test_windows_password_fallback_accepts_only_verified_password(self) -> None:
+        camera = self.FakeCamera()
+        checks = []
+        dialog, _events, _parent = self.make_dialog(
+            camera, password_fallback=lambda: checks.append("verified") or True,
+        )
+        self.show_dialog(dialog)
+        dialog._fail("We couldn't verify your face.")
+        dialog.use_password.click()
+        self.assertEqual(checks, ["verified"])
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertIn("password verified", dialog.status.text().lower())
+
+    def test_cancelled_or_failed_password_fallback_keeps_gate_closed(self) -> None:
+        camera = self.FakeCamera()
+        dialog, _events, _parent = self.make_dialog(
+            camera, password_fallback=lambda: False,
+        )
+        self.show_dialog(dialog)
+        dialog._fail("We couldn't verify your face.")
+        dialog.use_password.click()
+        self.assertEqual(dialog.result(), 0)
+        self.assertTrue(dialog.use_password.isVisible())
+        self.assertTrue(dialog.cancel.isEnabled())
+
     def test_missing_models_fail_closed_without_starting_the_camera(self) -> None:
         camera = self.FakeCamera()
-        dialog, events, _parent = self.make_dialog(camera)
+        dialog, events, _parent = self.make_dialog(camera, password_fallback=lambda: False)
         self.show_dialog(dialog, models=False)
         self.assertFalse(dialog.is_scanning())
         self.assertFalse(dialog.retry_visible())
+        self.assertTrue(dialog.use_password.isVisible())
         self.assertIn("models", dialog.status.text().lower())
         self.assertEqual(events, [])
         self.assertFalse(camera.gate_enabled)
@@ -938,11 +990,12 @@ class FaceGateTests(unittest.TestCase):
 
     def test_camera_failure_blocks_the_page_and_offers_retry(self) -> None:
         camera = self.FakeCamera()
-        dialog, _events, _parent = self.make_dialog(camera)
+        dialog, _events, _parent = self.make_dialog(camera, password_fallback=lambda: False)
         self.show_dialog(dialog)
         camera.failed.emit("the camera is busy")
         self.assertFalse(dialog.is_scanning())
         self.assertTrue(dialog.retry_visible())
+        self.assertTrue(dialog.use_password.isVisible())
         self.assertIn("camera", dialog.status.text().lower())
         self.assertEqual(dialog.result(), QDialog.Rejected)
         self.assertFalse(camera.gate_enabled)
@@ -955,16 +1008,19 @@ class NavigationGateTests(unittest.TestCase):
 
     class FakeGate:
         calls: list[str] = []
+        kwargs: list[dict] = []
         result = QDialog.Accepted
 
-        def __init__(self, _parent, purpose: str):
+        def __init__(self, _parent, purpose: str, **kwargs):
             type(self).calls.append(purpose)
+            type(self).kwargs.append(kwargs)
 
         def exec(self) -> int:
             return type(self).result
 
     def setUp(self) -> None:
         self.FakeGate.calls = []
+        self.FakeGate.kwargs = []
         self.FakeGate.result = QDialog.Accepted
 
     def window(self) -> MainWindow:
@@ -980,6 +1036,28 @@ class NavigationGateTests(unittest.TestCase):
             window.nav.buttons[2].click()
         self.assertEqual(window.stack.currentIndex(), 2)
         self.assertEqual(self.FakeGate.calls, ["Password"])
+        self.assertTrue(callable(self.FakeGate.kwargs[0]["password_fallback"]))
+        window.close()
+
+    def test_gate_password_action_opens_windows_verified_prompt(self) -> None:
+        window = self.window()
+
+        class AcceptedPasswordPrompt:
+            def __init__(self, _parent):
+                pass
+
+            def exec(self):
+                return QDialog.Accepted
+
+        with (
+            patch.object(desktop_main, "FaceGateDialog", self.FakeGate),
+            patch.object(desktop_main, "WindowsPasswordFallbackDialog",
+                         AcceptedPasswordPrompt),
+            patch.object(desktop_main.backend, "identity_summary",
+                         return_value=[{"name": "Sampath", "samples": 9}]),
+        ):
+            window.nav.buttons[2].click()
+            self.assertTrue(self.FakeGate.kwargs[0]["password_fallback"]())
         window.close()
 
     def test_cancelled_face_check_keeps_the_previous_page(self) -> None:

@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -831,15 +831,11 @@ class SettingsPage(QWidget):
         form.addWidget(self.threshold_note)
 
         form.addWidget(_title("Proof of life", "h2"))
-        self.liveness = SegmentedTiles((
-            ("heavy", "Heavy", "spoof checks and a required blink"),
-            ("strict", "Strict", "required blink (same protection as Heavy)"),
-        ))
-        form.addWidget(self.liveness)
         self.liveness_note = _muted(
-            "Look at the camera and blink naturally. Movement alone never authorizes "
-            "unlock. Glare, screen glow, device edges and print patterns are also checked. "
-            "These RGB-camera checks can miss spoofs, including video replays."
+            "Face forward, turn your head left, turn right, then face forward again when "
+            "prompted. If it stalls, face the camera directly, move a little closer, and "
+            "use steady front lighting. RGB head-motion checks are not proof of a live "
+            "person and may not detect photo or video replays."
         )
         self.liveness_note.setWordWrap(True)
         form.addWidget(self.liveness_note)
@@ -893,7 +889,6 @@ class SettingsPage(QWidget):
         self.threshold.setValue(int(round(settings.threshold * 100)))
         self._threshold_changed(self.threshold.value())
         self.timeout.setValue(int(settings.timeout))
-        self.liveness.set_value(backend._liveness_mode(settings.liveness))
         self.status.setText("")
 
     def _selection_changed(self, *_args) -> None:
@@ -951,7 +946,7 @@ class SettingsPage(QWidget):
             camera=self.window.settings.camera,
             idle_lock_enabled=self.window.settings.idle_lock_enabled,
             idle_lock_minutes=self.window.settings.idle_lock_minutes,
-            liveness=backend._liveness_mode(self.liveness.value()),
+            liveness="heavy",
         )
         was_running = backend.agent_running()
 
@@ -1469,6 +1464,133 @@ class PasswordCheckDialog(QDialog):
         self.cancel.setEnabled(True)
         self.status.setText(message)
         self.status.setStyleSheet(f"color: {ACCENT if ok else DANGER};")
+
+
+class WindowsPasswordFallbackDialog(QDialog):
+    """Verify the current Windows password once, without saving it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Use Windows password")
+        self.setMinimumWidth(430)
+        self._identity_task: Task | None = None
+        self._password_task: Task | None = None
+        self._password_secret: list[str] | None = None
+        self._password_result: tuple[bool, str] | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+        layout.addWidget(_title("Use Windows password", "h2"))
+        layout.addWidget(_muted(
+            "Enter your current Windows account password to open this page. "
+            "Glance verifies it with Windows and does not save it."
+        ))
+        layout.addWidget(_muted("Windows account"))
+        self.account = QLineEdit("Checking Windows account…")
+        self.account.setReadOnly(True)
+        layout.addWidget(self.account)
+        layout.addWidget(_muted("Password"))
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setPlaceholderText("Enter your Windows password")
+        self.password.setEnabled(False)
+        layout.addWidget(self.password)
+        self.status = _muted("")
+        layout.addWidget(self.status)
+
+        controls = QHBoxLayout()
+        controls.addStretch(1)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.clicked.connect(self.reject)
+        controls.addWidget(self.cancel)
+        self.check_button = QPushButton("Verify")
+        self.check_button.setObjectName("primary")
+        self.check_button.setEnabled(False)
+        self.check_button.clicked.connect(self._check)
+        controls.addWidget(self.check_button)
+        layout.addLayout(controls)
+
+        self.cancel.setEnabled(False)
+        self._identity_task = Task(self._identify_account, self)
+        self._identity_task.done.connect(self._account_identified)
+        self._identity_task.finished.connect(self._identity_task_finished)
+        self._identity_task.start()
+
+    @staticmethod
+    def _identify_account() -> tuple[bool, str]:
+        info = backend.identify_windows_account()
+        if not info.account:
+            return False, info.details or "Could not identify the current Windows account."
+        return True, info.account
+
+    def _account_identified(self, ok: bool, message: str) -> None:
+        if not ok:
+            self.account.clear()
+            self.status.setText(message or "Could not identify the Windows account.")
+            self.status.setStyleSheet(f"color: {DANGER};")
+            return
+        self.account.setText(message)
+        self.password.setEnabled(True)
+        self.check_button.setEnabled(True)
+
+    def _identity_task_finished(self) -> None:
+        self._identity_task = None
+        self.cancel.setEnabled(True)
+
+    def _check(self) -> None:
+        account = self.account.text().strip()
+        password = self.password.text()
+        if not account or not password:
+            self.status.setText("Enter your Windows password.")
+            return
+        self.password.clear()
+        self.check_button.setEnabled(False)
+        self.cancel.setEnabled(False)
+        self.status.setText("Verifying with Windows…")
+        self._password_secret = [password]
+        self._password_task = Task(
+            lambda: backend.check_account_password(account, self._password_secret[0]), self,
+        )
+        self._password_task.done.connect(self._password_result_received)
+        self._password_task.finished.connect(self._password_task_finished)
+        self._password_task.start()
+
+    def _password_result_received(self, ok: bool, message: str) -> None:
+        self._password_result = (ok, message)
+        if self._password_secret is not None:
+            self._password_secret.clear()
+        self._password_secret = None
+        self.password.clear()
+
+    def _password_task_finished(self) -> None:
+        self._password_task = None
+        result = self._password_result or (False, "Windows password verification failed.")
+        self._password_result = None
+        ok, message = result
+        if ok:
+            self.accept()
+            return
+        self.status.setText(message or "Windows did not verify this password. Try again.")
+        self.status.setStyleSheet(f"color: {DANGER};")
+        self.check_button.setEnabled(True)
+        self.cancel.setEnabled(True)
+
+    def _verification_running(self) -> bool:
+        # Keep task references until QThread.finished, not merely its `done`
+        # result signal: done is emitted from run() before the thread exits.
+        return self._identity_task is not None or self._password_task is not None
+
+    def reject(self) -> None:
+        if self._verification_running():
+            return
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._verification_running():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 # --------------------------------------------------------------------------- #
