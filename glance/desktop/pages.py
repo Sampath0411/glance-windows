@@ -1636,6 +1636,10 @@ class AboutPage(QWidget):
             "Glance",
             f"Face unlock, on your own device.\nVersion {__version__} · Windows 11",
         ))
+        info.add_row(SettingsRow(
+            "Face encryption",
+            "Face samples are sealed with Windows DPAPI (this account only).",
+        ))
         self.repo_button = QPushButton("GitHub")
         self.repo_button.setToolTip(REPO_URL)
         self.repo_button.clicked.connect(

@@ -188,15 +188,17 @@ fails closed if the camera or face models are unavailable.
 | **Face unlock** | Runs after Windows locks. The agent does nothing while the desktop is unlocked. |
 | **Multiple identities** | Enroll several people or several versions of yourself. Any enrolled face may authorize an unlock, or restrict it to one person in Recognition. |
 | **In-app face check** | Opening Your Face or Password checks an enrolled face and requires the same forward→left→right→forward head-turn challenge used by Windows unlock. If face verification fails, you can use your Windows password; Glance checks it with Windows without saving it again. Camera video is not shown. |
-| **Liveness checks** | Four possible-spoof cues plus a forward→left→right→forward head-turn challenge for Windows and in-app verification. RGB heuristics can still miss spoofs and sometimes flag ordinary scenes. |
+| **Liveness checks** | Four possible-spoof cues plus a forward→left→right→forward head-turn challenge for Windows and in-app verification. Light/Heavy and on/off are settable, but Windows unlock grants and the in-app check always keep the head-turn challenge; RGB heuristics can still miss spoofs and sometimes flag ordinary scenes. |
 | **Native Windows** | A real Win32 window: frameless glass shell, grouped sidebar, custom caption buttons, edge resize, snap, and maximise. |
 | **Glass interface** | A painted aurora backdrop under translucent panels, glass setting groups, and Windows-style window controls. |
 | **Six focused screens** | General, Your Face, Password, Camera, Recognition, and About. |
-| **Camera & recognition** | Choose the camera, match threshold, verification timeout, and autostart behavior. |
-| **Guided enrollment** | Automatically collects and saves 18 quality-checked face samples, with gentle pose prompts and in-app capture feedback. |
+| **Camera & recognition** | Cameras listed by name (numeric fallback), per-display camera choices, a Display-on choice, match confidence stops (Less strict 0.58 / Default 0.63 / More strict 0.68) plus a fine threshold slider, detection distance Close/Default/Far, face detection duration (3–10 s), and separate window autostart. |
+| **Guided enrollment** | Automatically collects and saves 18 quality-checked face samples, with gentle pose prompts and per-identity on/off toggles, Recapture (replaces samples), Remove, and capture-quality percentages (face size, sharpness, lighting). |
 | **Idle auto-lock** | Optional keyboard/mouse inactivity lock, off by default, adjustable from 1 to 120 minutes (5 minutes by default). |
-| **Fail closed** | No enrolled faces, a missing credential, a stale grant, an unavailable camera or face model, or any provider error falls back to the normal Windows password tile. |
-| **Your data, your call** | Edit or delete your enrollment or stored password at any time. |
+| **Auto-lock session** | Settings session lifetime of 7/14/30 days or Never, separate from idle auto-lock, with a Session pill on General that locks/unlocks the session with a face check. |
+| **Unlock animation** | Show/hide the animation, Original or Minimal style (in-app only; never shown on the lock screen). |
+| **Fail closed** | No enrolled faces, every identity disabled, a missing credential, a stale grant, an unavailable camera or face model, a failed face-unseal, or any provider error falls back to the normal Windows password tile. |
+| **Your data, your call** | Edit, disable, recapture, or delete your enrollment at any time; Change or Remove the stored password (Remove keeps face unlock installed). |
 | **Local by design** | Recognition and liveness run on-device. No face data, camera frames, or credentials are sent to a server. |
 
 ---
@@ -220,11 +222,12 @@ Optional **Auto-lock when idle** is in General settings. It is off by default an
 keyboard/mouse inactivity while background protection is running. After an idle-triggered
 lock, a fresh key press or mouse movement is required before face verification starts.
 
-Embeddings are stored locally in `%LOCALAPPDATA%\Glance\data\identities.json` and protected
-by your Windows profile's file permissions. This build does **not** encrypt the embedding
-file. A 512-number embedding is not an image and cannot be turned back into one, but it is
-still biometric data: use a Windows account with a strong password, and delete the file if
-you stop using Glance.
+Embeddings are stored locally in `%LOCALAPPDATA%\Glance\data\identities.json`, sealed with
+**DPAPI at user scope** — the file on disk is a DPAPI blob that only the Windows account that
+created it can open. Legacy plaintext identity files are migrated automatically on first read
+(a `.bak` copy is kept before sealing). A 512-number embedding is not an image and cannot be
+turned back into one, but it is still biometric data: use a Windows account with a strong
+password, and delete the file if you stop using Glance.
 
 ### Credentials
 
