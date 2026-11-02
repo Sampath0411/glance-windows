@@ -711,13 +711,21 @@ def log_text(name: str, limit: int = 400) -> str:
     return "\n".join(lines[-limit:])
 
 
-def _last_unlock() -> str:
+# The agent logs the grant itself ("granted <name> (...") and then a
+# "verification finished: granted" bookend line. Only the former names the
+# person who unlocked, so only it counts here.
+_GRANT_LINE = re.compile(r"granted (\S+) \(")
+
+
+def _last_unlock(log_dir: Path | None = None) -> str:
+    """Return the most recent recorded face-unlock grant line, or "never"."""
+    lines_path = (log_dir or LOG_DIR) / "agent.log"
     try:
-        lines = (LOG_DIR / "agent.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = lines_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return "never"
     for line in reversed(lines):
-        if " granted " in line:
+        if _GRANT_LINE.search(line):
             return line.strip()
     return "never"
 

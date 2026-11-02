@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from ctypes import wintypes
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
@@ -551,11 +552,39 @@ def build_tray(window: MainWindow) -> QSystemTrayIcon:
     return tray
 
 
-def claim_instance() -> bool:
-    handle = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
+_kernel32_checked = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32_checked.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32_checked.CreateMutexW.restype = wintypes.HANDLE
+
+# Kept alive for the life of the process so the mutex stays held; closing or
+# dropping this handle would let a second instance in.
+_instance_mutex = None
+
+
+def _acquire_mutex(name: str) -> bool:
+    """Return True when this process is the sole holder of ``name``.
+
+    use_last_error=True makes ctypes snapshot the error code immediately after
+    the call, so ERROR_ALREADY_EXISTS can be trusted here. Without it the code
+    always reads stale error 0 and a second instance is let in. Zeroing the
+    slot first matters too: Win32 does not clear GetLastError on success, so
+    without this a fresh creation could read a stale error from an unrelated
+    earlier call.
+    """
+    global _instance_mutex
+    ctypes.set_last_error(0)
+    handle = _kernel32_checked.CreateMutexW(None, False, name)
     if not handle:
-        return True
-    return ctypes.get_last_error() != 183
+        return True  # cannot tell - being able to open the app matters more than tidiness
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        _kernel32_checked.CloseHandle(handle)
+        return False
+    _instance_mutex = handle
+    return True
+
+
+def claim_instance() -> bool:
+    return _acquire_mutex(APP_MUTEX)
 
 
 def main() -> int:

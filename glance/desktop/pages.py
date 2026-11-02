@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
@@ -92,6 +93,19 @@ def _scrollable(inner: QWidget) -> QScrollArea:
     area.setWidget(inner)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     return area
+
+
+def _unlock_display(line: str) -> tuple[str, str]:
+    """Render an agent grant line as (time, unlocker name).
+
+    Agent lines look like "2026-10-31 21:56:19  granted Sampath (centroid ...".
+    The trailing "verification finished: granted" bookend has no name and must
+    never be mistaken for the unlock.
+    """
+    stamp = " ".join(line.split()[:2])
+    shown = stamp[11:] if len(stamp) > 11 else stamp
+    match = re.search(r"granted (\S+)", line)
+    return shown, match.group(1) if match else ""
 
 
 class Task(QThread):
@@ -388,10 +402,11 @@ class Dashboard(QWidget):
         self.unlock_card[1].setText("—")
         line = snapshot["unlock"]
         if line != "never":
-            stamp = " ".join(line.split()[:2])
-            self.unlock_card[1].setText(stamp[11:] if len(stamp) > 11 else stamp)
-            name = line.split("granted", 1)[1].strip().split(" ")[0]
-            self.unlock_card[2].setText(f"{name} · most recent grant")
+            shown, name = _unlock_display(line)
+            self.unlock_card[1].setText(shown)
+            self.unlock_card[2].setText(
+                f"{name} · most recent grant" if name else "most recent grant"
+            )
         else:
             self.unlock_card[2].setText("no unlock recorded")
 
