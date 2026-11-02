@@ -421,7 +421,7 @@ class _FakePipeline:
         self.head_turn_series = head_turn_series
         self.identity_series = identity_series
         self.calls = 0
-        self.person = SimpleNamespace(name="Sampath")
+        self.person = SimpleNamespace(name="Sampath", enabled=True)
         self.current_person = self.person
         self.store = SimpleNamespace(
             identities=[self.person],
@@ -437,7 +437,7 @@ class _FakePipeline:
         if self.identity_series:
             name = self.identity_series[min(self.calls - 1, len(self.identity_series) - 1)]
             if name != self.person.name:
-                self.current_person = SimpleNamespace(name=name)
+                self.current_person = SimpleNamespace(name=name, enabled=True)
                 self.store.identities.append(self.current_person)
             else:
                 self.current_person = self.person

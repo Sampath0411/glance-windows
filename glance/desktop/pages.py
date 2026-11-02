@@ -466,6 +466,7 @@ class EnrollPage(QWidget):
         self._auto_active = False
         self._discard_pending = False
         self._session_name = ""
+        self._recapture_target = ""
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(850)
         self._capture_timer.timeout.connect(self._capture)
@@ -551,7 +552,21 @@ class EnrollPage(QWidget):
         people_layout = QVBoxLayout(people)
         people_layout.setContentsMargins(18, 16, 18, 16)
         people_layout.setSpacing(8)
-        people_layout.addWidget(_title("Enrolled", "h2"))
+        people_header = QHBoxLayout()
+        people_header.addWidget(_title("Enrolled", "h2"))
+        people_header.addStretch(1)
+        self.add_identity_button = QPushButton("+")
+        self.add_identity_button.setToolTip("Enroll a new identity")
+        self.add_identity_button.setFixedWidth(34)
+        self.add_identity_button.clicked.connect(self._begin_new_enrollment)
+        people_header.addWidget(self.add_identity_button)
+        people_layout.addLayout(people_header)
+        self.people_help = _muted(
+            "Enroll separate identities to use Glance with multiple people, "
+            "accessories (ex. glasses), facial expressions, or new lighting "
+            "environments. This improves recognition quality."
+        )
+        people_layout.addWidget(self.people_help)
         self.people_box = QVBoxLayout()
         self.people_box.setSpacing(6)
         people_layout.addLayout(self.people_box)
@@ -624,15 +639,18 @@ class EnrollPage(QWidget):
             )
             self.window._navigate(2)
             return
-        name = self.name_edit.text().strip()
-        if not name:
-            self.quality.setText("Give this face a name first.")
-            self.name_edit.setFocus()
-            return
+        if self._recapture_target:
+            name = self._recapture_target
+        else:
+            name = self.name_edit.text().strip()
+            if not name:
+                self.quality.setText("Give this face a name first.")
+                self.name_edit.setFocus()
+                return
+            self._session_name = name
+            self.name_edit.setEnabled(False)
         if not self._camera_ready or self._capture_pending or self._session.complete:
             return
-        self._session_name = name
-        self.name_edit.setEnabled(False)
         self._auto_active = True
         self.animation.show_state("idle")
         self._capture_timer.start()
@@ -656,9 +674,9 @@ class EnrollPage(QWidget):
             if self._auto_active and self.animation.state != "failure":
                 self.animation.show_state("failure")
             return
-        accepted, note = self._session.accept(capture.embedding, capture.pose)
+        accepted, note = self._session.accept(capture.embedding, capture.pose, capture.quality)
         self.counter.setText(f"{len(self._samples)} / {TARGET} samples")
-        self.capture_card.set_count(len(self._samples))
+        self.capture_card.set_samples(self._session.qualities)
         self.quality.setText(note)
         self.quality.setStyleSheet(f"color: {ACCENT if accepted else WARN};")
         if accepted:
@@ -697,8 +715,10 @@ class EnrollPage(QWidget):
         self._session = EnrollmentSession()
         self._samples = self._session.samples
         self._session_name = ""
+        self._recapture_target = ""
         self.name_edit.setEnabled(True)
-        self.capture_card.set_count(0)
+        self.name_edit.clear()
+        self.capture_card.set_samples([])
         self.animation.show_state("idle")
         self.save_button.setEnabled(False)
         self._refresh_capture_button()
@@ -706,8 +726,11 @@ class EnrollPage(QWidget):
         self.quality.setText("No samples yet")
         self.quality.setStyleSheet("")
 
+    def _begin_new_enrollment(self) -> None:
+        self._clear()
+
     def _save(self) -> None:
-        name = self._session_name
+        name = self._recapture_target or self._session_name
         if not name:
             QMessageBox.information(self, "Glance", "Give this face a name first.")
             return
@@ -715,10 +738,17 @@ class EnrollPage(QWidget):
             self.quality.setText("Collect all 18 good samples before saving.")
             return
 
+        embeddings = [embedding for embedding, _ in self._samples]
+        qualities = [quality for _, quality in self._samples]
         try:
             store = IdentityStore(backend.IDENTITIES_PATH)
-            for embedding in self._samples:
-                store.add_sample(name, embedding)
+            if self._recapture_target:
+                # Recapture replaces the identity's samples wholesale; it is a
+                # redo, never an append.
+                store.replace_samples(name, embeddings, qualities)
+            else:
+                for embedding, quality in zip(embeddings, qualities):
+                    store.add_sample(name, embedding, quality)
             store.save()
         except Exception as error:  # noqa: BLE001
             self.quality.setText(f"Could not save: {error}. Samples kept; use Retry save.")
@@ -727,10 +757,14 @@ class EnrollPage(QWidget):
             return
 
         count = len(self._samples)
+        recaptured = self._recapture_target
         self._session = EnrollmentSession()
         self._samples = self._session.samples
+        self._session_name = ""
+        self._recapture_target = ""
         self.counter.setText("18 / 18 · saved")
         self.name_edit.setEnabled(True)
+        self.name_edit.clear()
         self.save_button.setEnabled(False)
         self.animation.show_state("success")
         self._refresh_capture_button()
@@ -739,6 +773,9 @@ class EnrollPage(QWidget):
         self.window.camera.reload_store()
         self.refresh_people()
         self.window.on_identities_changed(name)
+        if recaptured:
+            self.quality.setText(f"Recaptured {name}: their samples were replaced.")
+            self.quality.setStyleSheet(f"color: {ACCENT};")
 
     def refresh_people(self) -> None:
         while self.people_box.count():
@@ -756,13 +793,71 @@ class EnrollPage(QWidget):
             row = QWidget()
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(IdentityCaptureCard(person['name'], person['samples']), 1)
+            layout.setSpacing(8)
+            layout.addWidget(
+                IdentityCaptureCard(person["name"], person["qualities"]), 1
+            )
 
+            controls = QVBoxLayout()
+            controls.setSpacing(6)
+            enabled = CheckBox("Enabled")
+            enabled.setChecked(bool(person["enabled"]))
+            enabled.setToolTip(
+                "Disabled identities are never matched. If every identity is "
+                "disabled, unlock fails closed."
+            )
+            enabled.toggled.connect(
+                lambda checked, n=person["name"]: self._toggle_enabled(n, checked)
+            )
+            controls.addWidget(enabled)
+
+            buttons = QHBoxLayout()
+            buttons.setSpacing(6)
+            recapture = QPushButton("Recapture")
+            recapture.clicked.connect(
+                lambda _=False, n=person["name"]: self._begin_recapture(n)
+            )
+            buttons.addWidget(recapture)
             remove = QPushButton("Remove")
             remove.setObjectName("danger")
             remove.clicked.connect(lambda _=False, n=person["name"]: self._remove(n))
-            layout.addWidget(remove)
+            buttons.addWidget(remove)
+            controls.addLayout(buttons)
+            layout.addLayout(controls)
             self.people_box.addWidget(row)
+
+    def _toggle_enabled(self, name: str, enabled: bool) -> None:
+        ok, message = backend.set_identity_enabled(name, enabled)
+        if not ok:
+            QMessageBox.warning(self, "Glance", message)
+        else:
+            self.quality.setText(message)
+            self.quality.setStyleSheet(f"color: {WARN if not enabled else ACCENT};")
+        self.window.camera.reload_store()
+        self.refresh_people()
+
+    def _begin_recapture(self, name: str) -> None:
+        confirm = QMessageBox.question(
+            self, "Glance",
+            f"Recapture {name}? Their current samples will be replaced, not added to.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self._pause_capture()
+        self._session = EnrollmentSession()
+        self._samples = self._session.samples
+        self._session_name = name
+        self._recapture_target = name
+        self.name_edit.setEnabled(False)
+        self.name_edit.setText(name)
+        self.capture_card.name.setText(name)
+        self.capture_card.set_samples([])
+        self.animation.show_state("idle")
+        self.save_button.setEnabled(False)
+        self._refresh_capture_button()
+        self.counter.setText("0 samples")
+        self.quality.setText(f"Recapturing {name}. Look at the camera and follow the prompts.")
+        self.quality.setStyleSheet("")
 
     def _remove(self, name: str) -> None:
         confirm = QMessageBox.question(

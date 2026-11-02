@@ -278,20 +278,34 @@ class ArcFaceEmbedder:
 # identity store
 # --------------------------------------------------------------------------- #
 @dataclass
+class FaceSample:
+    """One stored enrollment sample and its capture-quality score.
+
+    ``quality`` is the Windows capture-quality signal recorded when the sample
+    was taken (0..1, see ``glance/desktop/camera.py``). Samples saved before
+    quality existed are ``None`` (unrated) and are never counted as poor.
+    """
+
+    embedding: np.ndarray
+    quality: float | None = None
+
+
+@dataclass
 class Identity:
     name: str
-    samples: list[np.ndarray] = field(default_factory=list)
+    enabled: bool = True
+    samples: list[FaceSample] = field(default_factory=list)
 
     @property
     def template(self) -> np.ndarray:
         """Centroid of all samples, re-normalized (Glance's `template`)."""
         if not self.samples:
             raise ValueError("identity has no samples")
-        return l2_normalize(np.mean(np.stack(self.samples), axis=0))
+        return l2_normalize(np.mean(np.stack([s.embedding for s in self.samples]), axis=0))
 
     def score(self, embedding: np.ndarray) -> tuple[float, float]:
         centroid = cosine(embedding, self.template)
-        nearest = max(cosine(embedding, s) for s in self.samples)
+        nearest = max(cosine(embedding, s.embedding) for s in self.samples)
         return centroid, nearest
 
 
@@ -303,32 +317,69 @@ class IdentityStore:
         self.identities: list[Identity] = []
         self.load()
 
+    @staticmethod
+    def _parse_sample(raw) -> FaceSample:
+        if isinstance(raw, dict):
+            embedding = np.array(raw.get("embedding"), dtype=np.float32)
+            quality = raw.get("quality")
+            quality = float(quality) if quality is not None else None
+        else:
+            # Legacy identity files stored bare embedding arrays; they are
+            # unrated (quality is None) and never counted as poor.
+            embedding = np.array(raw, dtype=np.float32)
+            quality = None
+        return FaceSample(embedding, quality)
+
     def load(self) -> None:
         if not self.path.exists():
             return
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.identities = [
-            Identity(name=i["name"], samples=[np.array(s, dtype=np.float32) for s in i["samples"]])
-            for i in data.get("identities", [])
-        ]
+        identities = []
+        for item in data.get("identities", []):
+            enabled = item.get("enabled", True)
+            samples = [self._parse_sample(raw) for raw in (item.get("samples") or [])]
+            identities.append(Identity(name=item["name"], enabled=enabled, samples=samples))
+        self.identities = identities
 
     def save(self) -> None:
         payload = {
             "version": 1,
             "model": "arcface-w600k_mbf-v1",
             "identities": [
-                {"name": i.name, "samples": [s.tolist() for s in i.samples]} for i in self.identities
+                {
+                    "name": i.name,
+                    "enabled": i.enabled,
+                    "samples": [
+                        {"embedding": s.embedding.tolist(), "quality": s.quality}
+                        for s in i.samples
+                    ],
+                }
+                for i in self.identities
             ],
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def add_sample(self, name: str, embedding: np.ndarray) -> Identity:
+    def add_sample(self, name: str, embedding: np.ndarray, quality: float | None = None) -> Identity:
         identity = next((i for i in self.identities if i.name == name), None)
         if identity is None:
             identity = Identity(name=name)
             self.identities.append(identity)
-        identity.samples.append(embedding.astype(np.float32))
+        identity.samples.append(FaceSample(embedding.astype(np.float32), quality))
+        return identity
+
+    def replace_samples(self, name: str, embeddings: list[np.ndarray],
+                       qualities: list[float | None] | None = None) -> Identity:
+        """Replace an identity's samples wholesale (recapture is a redo, never an append)."""
+        identity = next((i for i in self.identities if i.name == name), None)
+        if identity is None:
+            identity = Identity(name=name)
+            self.identities.append(identity)
+        qualities = qualities or [None] * len(embeddings)
+        identity.samples = [
+            FaceSample(np.asarray(e, dtype=np.float32), q)
+            for e, q in zip(embeddings, qualities)
+        ]
         return identity
 
     def best_match(self, embedding: np.ndarray, threshold: float = DEFAULT_THRESHOLD):
@@ -336,10 +387,11 @@ class IdentityStore:
 
         That is FaceRecognitionPipeline.bestMatch: averaging can blur distinct
         appearances together, so the nearest single sample gets a veto.
+        Disabled identities are never matched.
         """
         best = None
         for identity in self.identities:
-            if not identity.samples:
+            if not identity.enabled or not identity.samples:
                 continue
             centroid, nearest = identity.score(embedding)
             if centroid >= threshold and nearest >= threshold:

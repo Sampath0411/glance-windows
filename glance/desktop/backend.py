@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.grant import clear_pending_grant
+from ..core import IdentityStore
 from ..models import models_present, provision_models
 from ..paths import PATHS
 from .. import protection_state
@@ -645,10 +646,48 @@ def _identity_summary() -> list[dict]:
         data = json.loads(IDENTITIES_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return [
-        {"name": item.get("name", "?"), "samples": len(item.get("samples") or [])}
-        for item in data.get("identities", [])
-    ]
+    summary = []
+    for item in data.get("identities", []):
+        qualities = []
+        for sample in item.get("samples") or []:
+            if isinstance(sample, dict):
+                quality = sample.get("quality")
+                qualities.append(float(quality) if quality is not None else None)
+            else:
+                qualities.append(None)
+        summary.append({
+            "name": item.get("name", "?"),
+            "samples": len(qualities),
+            "qualities": qualities,
+            "enabled": item.get("enabled", True),
+        })
+    return summary
+
+
+def set_identity_enabled(name: str, enabled: bool) -> tuple[bool, str]:
+    """Persist the per-identity on/off toggle. Disabled identities are never
+    matched by the agent or the in-app check (best_match skips them), so an
+    unlock with every identity disabled fails closed."""
+    try:
+        store = IdentityStore(IDENTITIES_PATH)
+    except Exception as error:  # noqa: BLE001 - unreadable store is a fail-closed state
+        return False, f"Could not read enrolled faces: {error}"
+    identity = next((i for i in store.identities if i.name == name), None)
+    if identity is None:
+        return False, f"no identity named {name}"
+    if identity.enabled == enabled:
+        invalidate("identities")
+        return True, f"{name} is already {'enabled' if enabled else 'disabled'}"
+    identity.enabled = enabled
+    try:
+        store.save()
+    except OSError as error:
+        return False, f"Could not save the change: {error}"
+    invalidate("identities")
+    if not enabled:
+        invalidate("task")
+        return True, f"{name} is disabled; they can no longer unlock."
+    return True, f"{name} is enabled again."
 
 
 def identity_summary(max_age: float = 5.0) -> list[dict]:

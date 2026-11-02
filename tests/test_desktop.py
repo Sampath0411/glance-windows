@@ -391,7 +391,9 @@ class AgentIdentityTests(unittest.TestCase):
 
     class FakePipeline:
         def __init__(self, *args, **kwargs) -> None:
-            self.store = SimpleNamespace(identities=[SimpleNamespace(name="Sampath")])
+            self.store = SimpleNamespace(
+                identities=[SimpleNamespace(name="Sampath", enabled=True)]
+            )
             self.open_calls = 0
 
         def open_camera(self, index: int = 0):
@@ -468,7 +470,7 @@ class AgentIdentityTests(unittest.TestCase):
 
         class Pipeline:
             def __init__(self, *args, **kwargs) -> None:
-                people = [SimpleNamespace(name=name) for name in identities]
+                people = [SimpleNamespace(name=name, enabled=True) for name in identities]
                 matched = next((person for person in people if person.name == face_name), None)
                 self.store = SimpleNamespace(
                     identities=people,
@@ -1259,7 +1261,7 @@ class EnrollmentUiTests(unittest.TestCase):
     def test_identity_capture_card_uses_active_theme_selectors(self) -> None:
         from glance.desktop.capture_widgets import IdentityCaptureCard
 
-        card = IdentityCaptureCard("Sampath", 12)
+        card = IdentityCaptureCard("Sampath", [None] * 12)
         self.assertEqual(card.objectName(), "identityCaptureCard")
         self.assertEqual(card.name.objectName(), "identityName")
         self.assertEqual(card.detail.objectName(), "identityDetail")
@@ -1312,6 +1314,7 @@ class EnrollmentUiTests(unittest.TestCase):
             for embedding, pose in zip(samples, poses):
                 page.on_capture(SimpleNamespace(
                     embedding=embedding, ok=True, pose=pose, message="Good sample",
+                    quality=0.75,
                 ))
 
         self.assertEqual(store_class.return_value.add_sample.call_count, 18)

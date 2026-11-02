@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 from ..paths import resolve_paths
-from .enrollment import TARGET
+from .enrollment import TARGET, quality_percent, quality_tier
 
 _loader = None
 _clips = None
@@ -146,17 +146,29 @@ class ScanAnimation(QWidget):
         super().hideEvent(event)
 
 
+_TIER_COLORS = {
+    "poor": QColor(255, 107, 107),
+    "fair": QColor(230, 185, 92),
+    "good": QColor(94, 220, 120),
+}
+
+
 class CaptureBars(QWidget):
-    def __init__(self, count=0, parent=None):
+    """One colored tick per sample slot; unrated ticks are hollow/dim."""
+
+    def __init__(self, qualities=None, parent=None):
         super().__init__(parent)
-        self.count = count
+        self.qualities = list(qualities or [])
         self.setFixedHeight(26)
         self.setMinimumWidth(155)
 
-    def set_count(self, count):
-        self.count = max(0, min(TARGET, count))
-        self.setAccessibleName(f"{self.count} of {TARGET} samples")
+    def set_samples(self, qualities):
+        self.qualities = list(qualities or [])
+        self.setAccessibleName(f"{len(self.qualities)} of {TARGET} samples")
         self.update()
+
+    def set_count(self, count):
+        self.set_samples([None] * max(0, min(TARGET, count)))
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -164,14 +176,20 @@ class CaptureBars(QWidget):
         p.setPen(Qt.NoPen)
         step = min(9, self.width() / TARGET)
         for i in range(TARGET):
-            color = QColor.fromHsvF(i / (TARGET - 1) * .36, .66, .97)
-            color.setAlpha(255 if i < self.count else 48)
-            p.setBrush(color)
-            p.drawRoundedRect(QRectF(i * step, 3, 3.5, 21), 1.7, 1.7)
+            rect = QRectF(i * step, 3, 3.5, 21)
+            if i < len(self.qualities):
+                tier = quality_tier(self.qualities[i])
+                color = _TIER_COLORS.get(tier, QColor(150, 165, 190))
+                color.setAlpha(255 if tier else 110)
+                p.setBrush(color)
+                p.drawRoundedRect(rect, 1.7, 1.7)
+            else:
+                p.setBrush(QColor(255, 255, 255, 22))
+                p.drawRoundedRect(rect, 1.7, 1.7)
 
 
 class IdentityCaptureCard(QFrame):
-    def __init__(self, name, count=0, parent=None):
+    def __init__(self, name, samples=None, parent=None):
         super().__init__(parent)
         self.setObjectName("identityCaptureCard")
         layout = QVBoxLayout(self)
@@ -185,11 +203,21 @@ class IdentityCaptureCard(QFrame):
         layout.addWidget(self.detail)
         self.bars = CaptureBars()
         layout.addWidget(self.bars)
-        self.set_count(count)
+        self.set_samples(samples or [])
 
-    def set_count(self, count):
-        shown = min(TARGET, count)
-        level = "low" if shown < 6 else "building" if shown < TARGET else "complete"
-        self.detail.setText(f"Capture quality · {shown}/{TARGET} {level}")
-        self.setToolTip("Sample coverage, not a measure of authentication security.")
-        self.bars.set_count(shown)
+    def set_samples(self, qualities):
+        self.bars.set_samples(qualities)
+        total = len(qualities)
+        percent = quality_percent(qualities)
+        if percent is None:
+            self.detail.setText(f"Capture quality · {total}/{TARGET} not recorded")
+            self.setToolTip(
+                "Samples saved before capture quality existed. "
+                "Capture quality is not a measure of authentication security."
+            )
+        else:
+            self.detail.setText(f"Capture quality • {percent}% · {total}/{TARGET}")
+            self.setToolTip(
+                "Capture quality at capture time (face size, sharpness, "
+                "lighting). Not a measure of authentication security."
+            )

@@ -220,6 +220,26 @@ def log(message: str) -> None:
 
 # --- verification ----------------------------------------------------------
 
+def resolve_unlock_scope(store, any_identity: bool, identity: str | None) -> str | None:
+    """Return an error message when the unlock scope cannot proceed, else None.
+
+    Fail-closed rules: no enrolled faces, every identity disabled, or a
+    selected identity that is missing/disabled all refuse a grant.
+    """
+    if not store.identities:
+        return "no enrolled identities"
+    enabled = [person for person in store.identities if person.enabled]
+    if not enabled:
+        return "all enrolled faces are disabled"
+    if not any_identity and identity is not None:
+        enrolled = next((person for person in store.identities if person.name == identity), None)
+        if enrolled is None:
+            return "selected identity is not enrolled"
+        if not enrolled.enabled:
+            return "selected identity is disabled"
+    return None
+
+
 class Verifier:
     def __init__(self, threshold: float = 0.6, timeout: float = 90.0,
                  require_stable: int = 3, identity: str | None = None,
@@ -246,13 +266,9 @@ class Verifier:
             return "error: no unlock identity selected"
 
         pipeline = GlancePipeline(self.paths.identities_path, self.threshold)
-        if not pipeline.store.identities:
-            return "error: no enrolled identities"
-
-        if not self.any_identity and not any(
-            identity.name == self.identity for identity in pipeline.store.identities
-        ):
-            return "error: selected identity is not enrolled"
+        scope_error = resolve_unlock_scope(pipeline.store, self.any_identity, self.identity)
+        if scope_error is not None:
+            return f"error: {scope_error}"
 
         # In specific mode the selected identity is mandatory even when only one
         # person is enrolled. A missing or stale selection must never implicitly

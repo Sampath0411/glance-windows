@@ -51,6 +51,26 @@ class Capture:
     ok: bool = False
     message: str = ""
     pose: tuple[float, float] | None = None
+    quality: float | None = None
+
+
+def _ramp_01(value: float, floor: float, ceiling: float) -> float:
+    return float(min(max((value - floor) / max(ceiling - floor, 1e-4), 0.0), 1.0))
+
+
+def capture_quality(face_fraction: float, blur: float, brightness: float) -> float:
+    """Windows capture-quality score (0..1) recorded with each sample.
+
+    This is an honest engineering signal, not a security score: it combines the
+    face size (share of the frame), sharpness (Laplacian variance) and exposure
+    (mean luma) at capture time. Tiers: poor < 0.40, fair < 0.50, good
+    >= 0.50 (see ``glance/desktop/enrollment.py``). The UI labels it as
+    capture quality, never as an authentication-security measure.
+    """
+    size = _ramp_01(face_fraction, 0.02, 0.06)
+    sharp = _ramp_01(blur, 20.0, 80.0)
+    bright = 1.0 - _ramp_01(abs(brightness - 130.0), 0.0, 95.0)
+    return 0.5 * size + 0.3 * sharp + 0.2 * bright
 
 
 @dataclass
@@ -386,6 +406,7 @@ class CameraWorker(QThread):
         brightness = float(gray.mean())
         if not 35 <= brightness <= 225:
             return Capture(message="Use even lighting; avoid darkness or bright backlight")
+        quality = capture_quality(fraction, blur, brightness)
         embedding = pipeline.embedder.embed(aligned)
 
         score_name, score = "", 0.0
@@ -401,10 +422,10 @@ class CameraWorker(QThread):
                            message="The image is blurry - hold still")
         if blur < GOOD_BLUR:
             return Capture(embedding, fraction, blur, score_name, score, ok=True,
-                           message="Slightly blurry, but usable")
+                           message="Slightly blurry, but usable", quality=quality)
 
         return Capture(embedding, fraction, blur, score_name, score, ok=True,
-                       message="Good sample", pose=pose)
+                       message="Good sample", pose=pose, quality=quality)
 
     @staticmethod
     def _to_image(frame: np.ndarray) -> QImage:
