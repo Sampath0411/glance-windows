@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -193,6 +193,65 @@ class CheckBox(QCheckBox):
                 ]
             )
         )
+
+
+class HoldToConfirmButton(QPushButton):
+    """Destructive action requiring a sustained press (like the Mac hold-to-confirm)."""
+
+    confirmed = Signal()
+
+    HOLD_MS = 1200
+    STEP_MS = 60
+
+    def __init__(self, text: str = "Hold to confirm", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setObjectName("danger")
+        self._holding = False
+        self._elapsed = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.STEP_MS)
+        self._timer.timeout.connect(self._tick)
+        self.setToolTip("Press and hold to confirm")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._holding = True
+            self._elapsed = 0
+            self._timer.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._reset()
+        super().mouseReleaseEvent(event)
+
+    def _reset(self) -> None:
+        self._holding = False
+        self._elapsed = 0
+        self._timer.stop()
+        self.setText("Hold to confirm" if self.text().startswith("Hold") else self.text())
+        self.update()
+
+    def _tick(self) -> None:
+        self._elapsed += self.STEP_MS
+        remaining = max(0, self.HOLD_MS - self._elapsed)
+        self.setText(f"Hold {remaining // 1000 + 1}s")
+        self.update()
+        if self._elapsed >= self.HOLD_MS:
+            self._timer.stop()
+            self.confirmed.emit()
+            self._reset()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._holding:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        progress = min(1.0, self._elapsed / float(self.HOLD_MS))
+        rect = QRectF(0, 0, self.width() * progress, 3)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 107, 107))
+        painter.drawRoundedRect(rect, 1.5, 1.5)
 
 
 class ChoiceTile(QAbstractButton):

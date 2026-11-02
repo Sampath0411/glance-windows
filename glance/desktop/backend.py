@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 from ctypes import wintypes
@@ -79,6 +80,17 @@ def invalidate(*keys: str) -> None:
 # --------------------------------------------------------------------------- #
 # settings
 # --------------------------------------------------------------------------- #
+from ..core import DETECTION_DISTANCE_FRACTIONS, DETECTION_DISTANCE_DEFAULT
+
+MATCH_CONFIDENCE_STOPS = {
+    "less_strict": 0.58,
+    "default": 0.63,
+    "more_strict": 0.68,
+}
+
+LIVENESS_MODES = ("light", "heavy", "strict")
+
+
 @dataclass
 class Settings:
     """The agent reads these keys; the UI owns the last three."""
@@ -91,18 +103,29 @@ class Settings:
     idle_lock_minutes: int = 5
     any_identity: bool = True
     liveness: str = "heavy"
+    detection_distance: str = DETECTION_DISTANCE_DEFAULT
+    face_detection_seconds: int = 5
+    liveness_enabled: bool = True
+    animation_enabled: bool = True
+    animation_style: str = "original"
+    auto_retry_once: bool = False
+    camera_builtin: int | None = None
+    camera_external: int | None = None
+    display_choice: str = "main"
+    session_lifetime_days: int = 30
+    window_autostart: bool = False
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls, path: Path | None = None) -> "Settings":
         data: dict = {}
         try:
-            loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+            loaded = json.loads((path or CONFIG_PATH).read_text(encoding="utf-8-sig"))
             if isinstance(loaded, dict):
                 data = loaded
         except (OSError, ValueError):
             pass
         return cls(
-            threshold=float(data.get("threshold", 0.60)),
+            threshold=_threshold_value(data),
             timeout=float(data.get("timeout", 90.0)),
             identity=str(data.get("identity") or ""),
             camera=int(data.get("camera", 0)),
@@ -110,9 +133,29 @@ class Settings:
             idle_lock_minutes=_idle_minutes(data),
             any_identity=data.get("any_identity") is not False,
             liveness=_liveness_mode(data.get("liveness")),
+            detection_distance=_detection_distance(data),
+            face_detection_seconds=_face_detection_seconds(data),
+            liveness_enabled=data.get("liveness_enabled") is not False,
+            animation_enabled=data.get("animation_enabled") is not False,
+            animation_style=_animation_style(data.get("animation_style")),
+            auto_retry_once=data.get("auto_retry_once") is True,
+            camera_builtin=_camera_choice(data.get("camera_builtin")),
+            camera_external=_camera_choice(data.get("camera_external")),
+            display_choice=_display_choice(data.get("display_choice")),
+            session_lifetime_days=_session_lifetime_days(data),
+            window_autostart=data.get("window_autostart") is True,
         )
 
-    def save(self) -> None:
+    def camera_index_for_display(self) -> int:
+        """The numeric camera index to use for the chosen display.
+
+        Per-display choices default to the global ``camera`` index when unset.
+        """
+        chosen = self.camera_external if self.display_choice == "external" else self.camera_builtin
+        return int(self.camera) if chosen is None else chosen
+
+    def save(self, path: Path | None = None) -> None:
+        config_path = path or CONFIG_PATH
         payload = {
             "threshold": round(float(self.threshold), 2),
             "timeout": float(self.timeout),
@@ -122,17 +165,73 @@ class Settings:
             "idle_lock_minutes": max(1, min(120, int(self.idle_lock_minutes))),
             "any_identity": bool(self.any_identity),
             "liveness": _liveness_mode(self.liveness),
+            "detection_distance": self.detection_distance,
+            "face_detection_seconds": max(3, min(10, int(self.face_detection_seconds))),
+            "liveness_enabled": bool(self.liveness_enabled),
+            "animation_enabled": bool(self.animation_enabled),
+            "animation_style": _animation_style(self.animation_style),
+            "auto_retry_once": bool(self.auto_retry_once),
+            "camera_builtin": self.camera_builtin,
+            "camera_external": self.camera_external,
+            "display_choice": _display_choice(self.display_choice),
+            "session_lifetime_days": _session_lifetime_days({"session_lifetime_days": self.session_lifetime_days}),
+            "window_autostart": bool(self.window_autostart),
         }
         PATHS.ensure_data_dir()
-        temp = CONFIG_PATH.with_suffix(".tmp")
+        temp = config_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, CONFIG_PATH)
+        os.replace(temp, config_path)
 
 
 def _liveness_mode(value) -> str:
     """Unknown values fall back to the protective default, never to light/off."""
     text = str(value or "").strip().lower()
-    return text if text in ("light", "heavy", "strict") else "heavy"
+    return text if text in LIVENESS_MODES else "heavy"
+
+
+def _threshold_value(data: dict) -> float:
+    try:
+        value = float(data.get("threshold", 0.60))
+    except (TypeError, ValueError):
+        return 0.60
+    return min(0.85, max(0.45, value))
+
+
+def _detection_distance(data: dict) -> str:
+    text = str(data.get("detection_distance") or "").strip().lower()
+    return text if text in DETECTION_DISTANCE_FRACTIONS else DETECTION_DISTANCE_DEFAULT
+
+
+def _face_detection_seconds(data: dict) -> int:
+    try:
+        return max(3, min(10, int(data.get("face_detection_seconds", 5))))
+    except (TypeError, ValueError, OverflowError):
+        return 5
+
+
+def _animation_style(value) -> str:
+    return "minimal" if str(value or "").strip().lower() == "minimal" else "original"
+
+
+def _camera_choice(value) -> int | None:
+    """Parse an optional camera index; anything invalid means System default."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 5 else None
+
+
+def _display_choice(value) -> str:
+    return "external" if str(value or "").strip().lower() == "external" else "main"
+
+
+def _session_lifetime_days(data: dict) -> int:
+    try:
+        value = int(data.get("session_lifetime_days", 30))
+    except (TypeError, ValueError, OverflowError):
+        return 30
+    return value if value in (0, 7, 14, 30) else 30
 
 
 def _idle_minutes(data):
@@ -616,6 +715,60 @@ def disable_windows_unlock(reset: bool = False) -> tuple[bool, str]:
     return ok, message
 
 
+def clear_stored_password() -> tuple[bool, str]:
+    """Remove the stored Windows credential without touching the provider.
+
+    This is the stand-alone "Remove password" path; "Reset Glance…" still
+    removes the credential AND disables face unlock.
+    """
+    if not GRANT_TOOL.is_file():
+        return False, f"Glance credential helper is missing: {GRANT_TOOL}. Repair or reinstall Glance."
+    ok, output = _run([str(GRANT_TOOL), "clear"])
+    if not ok:
+        return False, output or "could not clear the stored credential"
+    invalidate("credential")
+    return True, "Stored password removed. Face samples remain; sign-in still needs your Windows password."
+
+
+def _window_autostart_command() -> str:
+    """Command for the HKCU Run value; quotes paths for safe shell parsing."""
+    if getattr(sys, "frozen", False) or os.environ.get("GLANCE_PACKAGED") == "1":
+        return f'"{sys.executable}"'
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    return f'"{pythonw}" -m glance.desktop.main'
+
+
+def set_window_autostart(enabled: bool) -> tuple[bool, str]:
+    """Open the Glance window at sign-in (separate from the background agent)."""
+    import winreg
+
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, "Glance Desktop", 0, winreg.REG_SZ, _window_autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, "Glance Desktop")
+                except FileNotFoundError:
+                    pass
+    except OSError as error:
+        return False, f"Could not update sign-in autostart: {error}"
+    return True, "Glance window will open at sign-in." if enabled else "Glance window will not open at sign-in."
+
+
+def window_autostart_enabled() -> bool:
+    import winreg
+
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_QUERY_VALUE) as key:
+            winreg.QueryValueEx(key, "Glance Desktop")
+        return True
+    except OSError:
+        return False
+
+
 def store_password(account: str, password: str) -> tuple[bool, str]:
     """Verify through Windows before storage; the password is never in argv."""
     if not GRANT_TOOL.is_file():
@@ -642,24 +795,19 @@ def store_password(account: str, password: str) -> tuple[bool, str]:
 # identities and logs
 # --------------------------------------------------------------------------- #
 def _identity_summary() -> list[dict]:
-    try:
-        data = json.loads(IDENTITIES_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    if not IDENTITIES_PATH.exists():
         return []
+    try:
+        store = IdentityStore(IDENTITIES_PATH)
+    except Exception as error:  # noqa: BLE001 - an unreadable store must surface, not hide
+        raise RuntimeError(f"Could not read enrolled faces: {error}") from error
     summary = []
-    for item in data.get("identities", []):
-        qualities = []
-        for sample in item.get("samples") or []:
-            if isinstance(sample, dict):
-                quality = sample.get("quality")
-                qualities.append(float(quality) if quality is not None else None)
-            else:
-                qualities.append(None)
+    for identity in store.identities:
         summary.append({
-            "name": item.get("name", "?"),
-            "samples": len(qualities),
-            "qualities": qualities,
-            "enabled": item.get("enabled", True),
+            "name": identity.name,
+            "samples": len(identity.samples),
+            "qualities": [sample.quality for sample in identity.samples],
+            "enabled": identity.enabled,
         })
     return summary
 

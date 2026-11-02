@@ -31,7 +31,10 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from . import dpapi
 from .paths import PATHS
+
+SEALED_MAGIC = b"GLNC-FACES\x01"
 
 MODELS_DIR = PATHS.models_dir
 DETECTOR_MODEL = MODELS_DIR / "det_500m.onnx"
@@ -40,6 +43,17 @@ RECOGNISER_MODEL = MODELS_DIR / "w600k_mbf.onnx"
 # Below this share of the frame, the face is too small to identify reliably.
 # At 1280x720 that is a bbox around 105px per side.
 MIN_FACE_FRACTION = 0.012
+
+# Windows detection-distance stops as minimum face AREA fraction of the frame.
+# The Mac stops are face-width fractions with different units; these Windows
+# equivalents anchor "default" at the historical 0.012 constant so existing
+# behavior is preserved, "close" raises the bar and "far" lowers it.
+DETECTION_DISTANCE_FRACTIONS = {
+    "close": 0.020,
+    "default": 0.012,
+    "far": 0.008,
+}
+DETECTION_DISTANCE_DEFAULT = "default"
 
 # Standard ArcFace 112x112 template: left eye, right eye, nose, left mouth
 # corner, right mouth corner. Identical to glance/FaceAligner.swift referencePoints.
@@ -310,12 +324,29 @@ class Identity:
 
 
 class IdentityStore:
-    """JSON on disk. Phase 3 swaps the plaintext embeddings for DPAPI-sealed blobs."""
+    """Faces stored as a DPAPI-sealed JSON payload (user scope).
+
+    Legacy plaintext JSON files are migrated on first read: a backup is left
+    at ``path + .bak`` and the sealed form replaces the original. If the
+    sealed payload cannot be unsealed (wrong account, corruption), the store
+    raises and never silently falls back to plaintext.
+    """
 
     def __init__(self, path: Path):
         self.path = path
         self.identities: list[Identity] = []
         self.load()
+
+    @property
+    def sealed(self) -> bool:
+        """True once this store persists as a DPAPI blob."""
+        if not self.path.exists():
+            return True
+        try:
+            raw = self.path.read_bytes()
+        except OSError:
+            return False
+        return raw.startswith(SEALED_MAGIC)
 
     @staticmethod
     def _parse_sample(raw) -> FaceSample:
@@ -330,10 +361,39 @@ class IdentityStore:
             quality = None
         return FaceSample(embedding, quality)
 
+    def _read_payload_bytes(self) -> bytes:
+        raw = self.path.read_bytes()
+        if raw.startswith(SEALED_MAGIC):
+            return dpapi.unprotect(raw[len(SEALED_MAGIC):])
+        # Legacy plaintext JSON: parse to confirm it is genuine before sealing.
+        try:
+            json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError("identity file is neither a sealed Glance payload "
+                               "nor readable JSON") from error
+        backup = self.path.with_suffix(self.path.suffix + ".bak")
+        if not backup.exists():
+            backup.write_bytes(raw)
+        sealed = SEALED_MAGIC + dpapi.protect(raw)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_bytes(sealed)
+        import os
+        os.replace(temporary, self.path)
+        return raw
+
+    def _write_payload_bytes(self, payload: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        sealed = SEALED_MAGIC + dpapi.protect(payload)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_bytes(sealed)
+        import os
+        os.replace(temporary, self.path)
+
     def load(self) -> None:
         if not self.path.exists():
             return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        payload = self._read_payload_bytes()
+        data = json.loads(payload.decode("utf-8"))
         identities = []
         for item in data.get("identities", []):
             enabled = item.get("enabled", True)
@@ -357,8 +417,7 @@ class IdentityStore:
                 for i in self.identities
             ],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
+        self._write_payload_bytes(json.dumps(payload).encode("utf-8"))
 
     def add_sample(self, name: str, embedding: np.ndarray, quality: float | None = None) -> Identity:
         identity = next((i for i in self.identities if i.name == name), None)

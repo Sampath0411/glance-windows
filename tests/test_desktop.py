@@ -312,12 +312,14 @@ class AdaptiveThemeTests(unittest.TestCase):
     def test_matching_profile_tiles_drive_the_threshold(self) -> None:
         window = MainWindow()
         page = window.settings_page
-        page.presets.tiles["strict"].click()
-        self.assertEqual(page.threshold.value(), 72)
-        self.assertTrue(page.presets.tiles["strict"].isChecked())
+        page.match_stops.tiles["more_strict"].click()
+        self.assertEqual(page.threshold.value(), 68)
+        self.assertTrue(page.match_stops.tiles["more_strict"].isChecked())
         page.threshold.setValue(63)
-        self.assertIsNone(page.presets.value())
+        self.assertEqual(page.match_stops.value(), "default")
         self.assertEqual(page.threshold_value.text(), "0.63")
+        page.threshold.setValue(66)
+        self.assertIsNone(page.match_stops.value())
         window.close()
 
     def test_compact_onboarding_module_is_available(self) -> None:
@@ -1246,7 +1248,7 @@ class EnrollmentUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def make_page(self) -> EnrollPage:
-        return EnrollPage(SimpleNamespace())
+        return EnrollPage(SimpleNamespace(settings=Settings()))
 
     def test_enrollment_animation_precedes_name_label_and_input(self) -> None:
         page = self.make_page()
@@ -1328,6 +1330,7 @@ class EnrollmentUiTests(unittest.TestCase):
         window = SimpleNamespace(
             _windows_password_stored=lambda: False,
             _navigate=lambda index: visited.append(index),
+            settings=Settings(),
         )
         page = EnrollPage(window)
         page.name_edit.setText("Taylor")

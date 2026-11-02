@@ -38,7 +38,11 @@ import cv2  # noqa: E402
 from . import grant as grant_mod  # noqa: E402
 from .. import liveness as lv  # noqa: E402
 from .. import protection_state  # noqa: E402
-from ..core import MIN_FACE_FRACTION, GlancePipeline  # noqa: E402
+from ..core import (  # noqa: E402
+    DETECTION_DISTANCE_DEFAULT,
+    DETECTION_DISTANCE_FRACTIONS,
+    GlancePipeline,
+)
 from ..paths import RuntimePaths, resolve_paths  # noqa: E402
 
 # --- session notifications -------------------------------------------------
@@ -244,7 +248,8 @@ class Verifier:
     def __init__(self, threshold: float = 0.6, timeout: float = 90.0,
                  require_stable: int = 3, identity: str | None = None,
                  any_identity: bool = False, liveness: str | lv.LivenessMode = "heavy",
-                 paths: RuntimePaths | None = None) -> None:
+                 paths: RuntimePaths | None = None,
+                 detection_distance: str = DETECTION_DISTANCE_DEFAULT) -> None:
         self.threshold = threshold
         self.timeout = timeout
         self.require_stable = require_stable
@@ -253,6 +258,10 @@ class Verifier:
         self.liveness = lv.LivenessMode.from_name(liveness)
         if self.liveness is lv.LivenessMode.LIGHT:
             self.liveness = lv.DEFAULT_MODE  # diagnostics must never authorize grants
+        self.min_face_fraction = DETECTION_DISTANCE_FRACTIONS.get(
+            str(detection_distance or "").strip().lower(),
+            DETECTION_DISTANCE_FRACTIONS[DETECTION_DISTANCE_DEFAULT],
+        )
         self.paths = paths or resolve_runtime_paths()
 
     def run(self, stop: threading.Event, is_locked=None) -> str:
@@ -313,7 +322,7 @@ class Verifier:
 
                 height, width = frame.shape[:2]
                 fraction = face.area / float(width * height)
-                if fraction < MIN_FACE_FRACTION:
+                if fraction < self.min_face_fraction:
                     reset_scan()
                     continue
 
@@ -672,7 +681,8 @@ def main() -> int:
 
     verifier = Verifier(args.threshold, args.timeout, identity=args.identity,
                         any_identity=args.any_identity, liveness=args.liveness,
-                        paths=paths)
+                        paths=paths,
+                        detection_distance=str(config.get("detection_distance") or ""))
 
     if args.simulate:
         outcome = verifier.run(threading.Event())
