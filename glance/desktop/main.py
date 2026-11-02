@@ -81,7 +81,9 @@ class MainWindow(QMainWindow):
         self._camera_stop_timer.setInterval(250)
         self._camera_stop_timer.timeout.connect(self._stop_camera_if_unowned)
 
-        self.camera = CameraWorker(self.settings.camera, self.settings.threshold, self)
+        self.camera = CameraWorker(
+            self.settings.camera_index_for_display(), self.settings.threshold, self
+        )
         self.camera.failed.connect(self._camera_failed)
 
         central = QWidget()
@@ -398,6 +400,9 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.restart_agent()
 
+    def _apply_display_preference(self) -> None:
+        _apply_display_choice(self, self.settings)
+
     def settings_changed(self) -> None:
         if not backend.agent_running():
             return
@@ -611,8 +616,28 @@ def main() -> int:
     window = MainWindow()
     build_tray(window)
     window.show()
+    _apply_display_choice(window, window.settings)
     QTimer.singleShot(250, window.startup_sequence)
     return app.exec()
+
+
+def _apply_display_choice(window, settings) -> None:
+    """Best-effort placement of the app window on the chosen display.
+
+    "Main display" is the primary screen; "external" prefers the last
+    non-primary screen when one exists, and falls back to the primary.
+    """
+    try:
+        screens = QApplication.screens()
+        if not screens:
+            return
+        if settings.display_choice == "external" and len(screens) > 1:
+            target = screens[-1]
+        else:
+            target = screens[0]
+        window.windowHandle().setScreen(target)
+    except Exception:  # noqa: BLE001 - placement is cosmetic; never fail startup
+        pass
 
 
 if __name__ == "__main__":
