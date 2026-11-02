@@ -20,11 +20,23 @@ on-device using ONNX Runtime and InsightFace, so your face data and Windows pass
 touch the internet. The app lives in a native Windows window with a dark navy interface, and
 the lock screen stays Windows' own.
 
+## Contents
+
+- [Installation](#installation)
+- [Your Windows account](#your-windows-account)
+- [Permissions](#permissions)
+- [How it works](#how-it-works)
+- [Features](#features)
+- [Privacy and Security](#privacy-and-security)
+- [Building from source](#building-from-source)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
 ---
 
 > [!WARNING]
-> ## Read before installing
-> ## Glance is not as secure as Windows Hello
+> ## Read before installing: Glance is not as secure as Windows Hello
 >
 > Most Windows PCs don't have the infrared or depth sensors that make Windows Hello
 > trustworthy and secure. A normal webcam sees a flat 2D image. That means:
@@ -54,12 +66,12 @@ the lock screen stays Windows' own.
 - A webcam
 - Administrator approval for installation and for enabling the credential provider
 
-Run `GlanceSetup.exe` and follow the installer. Glance installs its protected components
+Run `GlanceSetup.exe` and follow the prompts. Glance installs its protected components
 under `%ProgramFiles%\Glance`; the app and face agent themselves run unelevated. The
 installer is currently unsigned, so Windows may show an unverified-publisher or SmartScreen
 warning.
 
-After installation:
+### After installation
 
 1. Open **Glance** from Start.
 2. Let Glance download the face models (~16 MB) when it asks. They come from
@@ -80,7 +92,7 @@ name must match exactly: Glance hands the pair to Windows to verify before anyth
 stored, and a name that resolves to no user comes back as the same `rejected` message as a
 wrong password.
 
-You can do this without opening PowerShell. In Glance, open **About → Windows sign-in help**
+The easiest way to check this is inside Glance, without opening PowerShell. Open **About → Windows sign-in help**
 and choose **Check sign-in type**. Glance shows the account type and the name it detected.
 Choose **Check password** to verify the pair without saving it; the password is entered in a
 masked Glance dialog. If Windows cannot identify the account type reliably, Glance says so
@@ -183,9 +195,11 @@ fails closed if the camera or face models are unavailable.
 
 ## Features
 
+At a glance:
+
 | Feature | Description |
 |---|---|
-| **Face unlock** | Runs after Windows locks. The agent does nothing while the desktop is unlocked. |
+| **Face unlock** | Unlocks Windows after it locks. The agent stays idle while the desktop is unlocked. |
 | **Multiple identities** | Enroll several people or several versions of yourself. Any enrolled face may authorize an unlock, or restrict it to one person in Recognition. |
 | **In-app face check** | Opening Your Face or Password checks an enrolled face and requires the same forward→left→right→forward head-turn challenge used by Windows unlock. If face verification fails, you can use your Windows password; Glance checks it with Windows without saving it again. Camera video is not shown. |
 | **Liveness checks** | Four possible-spoof cues plus a forward→left→right→forward head-turn challenge for Windows and in-app verification. RGB heuristics can still miss spoofs and sometimes flag ordinary scenes. |
@@ -201,7 +215,7 @@ fails closed if the camera or face models are unavailable.
 
 ---
 
-# Privacy and Security
+## Privacy and Security
 
 Glance is designed to keep biometric data and credentials on the device.
 
@@ -231,7 +245,7 @@ you stop using Glance.
 Your Windows password is never written to disk in plaintext. It is encrypted with **DPAPI**
 at **machine scope** and stored under `HKLM\SOFTWARE\Glance`.
 
-Limitation, stated rather than buried: machine-scoped DPAPI defends the password against a
+**Limitation, stated rather than buried:** machine-scoped DPAPI defends the password against a
 copied registry hive, but not against a process running on this PC. A service-held secret with
 a narrower ACL is future hardening work. Treat Glance as convenience software, not as a vault.
 
@@ -295,6 +309,8 @@ assurance.
 ---
 
 ## Building from source
+
+Use these steps only if you want to run or build Glance from its source code. For everyday use, install from [Installation](#installation) instead.
 
 ### Prerequisites
 
