@@ -201,7 +201,7 @@ class PasswordHelperTests(unittest.TestCase):
         self.assertIn("enroll", message.lower())
         admin.assert_not_called()
 
-    def test_enable_unlock_accepts_anyone_mode_with_an_enrolled_face(self) -> None:
+    def test_enable_unlock_rejects_anyone_mode_with_an_enrolled_face(self) -> None:
         with (
             patch.object(backend, "current_user_sid", return_value="S-1-5-21-1-2-3-1001"),
             patch.object(backend.Settings, "load",
@@ -213,8 +213,9 @@ class PasswordHelperTests(unittest.TestCase):
             patch.object(backend, "run_admin_operation", return_value=(True, "ok")) as admin,
         ):
             ok, message = backend.enable_windows_unlock()
-        self.assertTrue(ok, message)
-        admin.assert_called_once_with("install-provider", "S-1-5-21-1-2-3-1001")
+        self.assertFalse(ok)
+        self.assertIn("select one enrolled person", message.lower())
+        admin.assert_not_called()
 
     def test_enable_unlock_rejects_a_stale_specific_identity(self) -> None:
         with (
@@ -244,13 +245,13 @@ class PasswordHelperTests(unittest.TestCase):
         self.assertTrue(anyone.any_identity)
         self.assertEqual(anyone.identity, "")
 
-    def test_settings_default_to_anyone_when_the_scope_key_is_absent(self) -> None:
+    def test_settings_default_to_no_unlock_scope_when_scope_key_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "agent_config.json"
             path.write_text(json.dumps({"identity": "Sampath"}), encoding="utf-8")
             with patch.object(backend, "CONFIG_PATH", path):
                 loaded = backend.Settings.load()
-        self.assertTrue(loaded.any_identity)
+        self.assertFalse(loaded.any_identity)
         self.assertEqual(loaded.identity, "Sampath")
 
     def test_autostart_cannot_be_changed_before_agent_task_exists(self) -> None:

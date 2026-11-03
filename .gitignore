@@ -23,6 +23,7 @@ __pycache__/
 !.env.example
 
 # Build products
+/.worktrees/
 /.build/
 /build/
 /dist/

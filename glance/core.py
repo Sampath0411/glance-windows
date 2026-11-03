@@ -23,7 +23,9 @@ to the secure desktop, so Phase 3 needs a credential provider instead.
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,7 +33,10 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from . import dpapi
 from .paths import PATHS
+
+SEALED_MAGIC = b"GLNC-FACES\x01"
 
 MODELS_DIR = PATHS.models_dir
 DETECTOR_MODEL = MODELS_DIR / "det_500m.onnx"
@@ -40,6 +45,17 @@ RECOGNISER_MODEL = MODELS_DIR / "w600k_mbf.onnx"
 # Below this share of the frame, the face is too small to identify reliably.
 # At 1280x720 that is a bbox around 105px per side.
 MIN_FACE_FRACTION = 0.012
+
+# Windows detection-distance stops as minimum face AREA fraction of the frame.
+# The Mac stops are face-width fractions with different units; these Windows
+# equivalents anchor "default" at the historical 0.012 constant so existing
+# behavior is preserved, "close" raises the bar and "far" lowers it.
+DETECTION_DISTANCE_FRACTIONS = {
+    "close": 0.020,
+    "default": 0.012,
+    "far": 0.008,
+}
+DETECTION_DISTANCE_DEFAULT = "default"
 
 # Standard ArcFace 112x112 template: left eye, right eye, nose, left mouth
 # corner, right mouth corner. Identical to glance/FaceAligner.swift referencePoints.
@@ -278,57 +294,170 @@ class ArcFaceEmbedder:
 # identity store
 # --------------------------------------------------------------------------- #
 @dataclass
+class FaceSample:
+    """One stored enrollment sample and its capture-quality score.
+
+    ``quality`` is the Windows capture-quality signal recorded when the sample
+    was taken (0..1, see ``glance/desktop/camera.py``). Samples saved before
+    quality existed are ``None`` (unrated) and are never counted as poor.
+    """
+
+    embedding: np.ndarray
+    quality: float | None = None
+
+
+@dataclass
 class Identity:
     name: str
-    samples: list[np.ndarray] = field(default_factory=list)
+    enabled: bool = True
+    samples: list[FaceSample] = field(default_factory=list)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     @property
     def template(self) -> np.ndarray:
         """Centroid of all samples, re-normalized (Glance's `template`)."""
         if not self.samples:
             raise ValueError("identity has no samples")
-        return l2_normalize(np.mean(np.stack(self.samples), axis=0))
+        return l2_normalize(np.mean(np.stack([s.embedding for s in self.samples]), axis=0))
 
     def score(self, embedding: np.ndarray) -> tuple[float, float]:
         centroid = cosine(embedding, self.template)
-        nearest = max(cosine(embedding, s) for s in self.samples)
+        nearest = max(cosine(embedding, s.embedding) for s in self.samples)
         return centroid, nearest
 
 
 class IdentityStore:
-    """JSON on disk. Phase 3 swaps the plaintext embeddings for DPAPI-sealed blobs."""
+    """Faces stored as a DPAPI-sealed JSON payload (user scope).
+
+    Legacy plaintext JSON files are migrated on first read: a backup is left
+    at ``path + .bak`` and the sealed form replaces the original. If the
+    sealed payload cannot be unsealed (wrong account, corruption), the store
+    raises and never silently falls back to plaintext.
+    """
 
     def __init__(self, path: Path):
         self.path = path
         self.identities: list[Identity] = []
         self.load()
 
+    @property
+    def sealed(self) -> bool:
+        """True once this store persists as a DPAPI blob."""
+        if not self.path.exists():
+            return True
+        try:
+            raw = self.path.read_bytes()
+        except OSError:
+            return False
+        return raw.startswith(SEALED_MAGIC)
+
+    @staticmethod
+    def _parse_sample(raw) -> FaceSample:
+        if isinstance(raw, dict):
+            embedding = np.array(raw.get("embedding"), dtype=np.float32)
+            quality = raw.get("quality")
+            quality = float(quality) if quality is not None else None
+        else:
+            # Legacy identity files stored bare embedding arrays; they are
+            # unrated (quality is None) and never counted as poor.
+            embedding = np.array(raw, dtype=np.float32)
+            quality = None
+        return FaceSample(embedding, quality)
+
+    def _read_payload_bytes(self) -> bytes:
+        raw = self.path.read_bytes()
+        if raw.startswith(SEALED_MAGIC):
+            return dpapi.unprotect(raw[len(SEALED_MAGIC):])
+        # Legacy plaintext JSON: parse to confirm it is genuine before sealing.
+        try:
+            json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError("identity file is neither a sealed Glance payload "
+                               "nor readable JSON") from error
+        backup = self.path.with_suffix(self.path.suffix + ".bak")
+        if not backup.exists():
+            backup.write_bytes(raw)
+        sealed = SEALED_MAGIC + dpapi.protect(raw)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_bytes(sealed)
+        os.replace(temporary, self.path)
+        return raw
+
+    def _write_payload_bytes(self, payload: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        sealed = SEALED_MAGIC + dpapi.protect(payload)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_bytes(sealed)
+        os.replace(temporary, self.path)
+
     def load(self) -> None:
         if not self.path.exists():
             return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.identities = [
-            Identity(name=i["name"], samples=[np.array(s, dtype=np.float32) for s in i["samples"]])
-            for i in data.get("identities", [])
-        ]
+        payload = self._read_payload_bytes()
+        data = json.loads(payload.decode("utf-8"))
+        identities = []
+        seen_ids: set[str] = set()
+        migrated_ids = False
+        for item in data.get("identities", []):
+            enabled = item.get("enabled", True)
+            samples = [self._parse_sample(raw) for raw in (item.get("samples") or [])]
+            identity_id = item.get("id")
+            try:
+                identity_id = str(uuid.UUID(str(identity_id)))
+            except (ValueError, TypeError, AttributeError):
+                identity_id = str(uuid.uuid4())
+                migrated_ids = True
+            if identity_id in seen_ids:
+                identity_id = str(uuid.uuid4())
+                migrated_ids = True
+            seen_ids.add(identity_id)
+            identities.append(Identity(
+                name=item["name"], enabled=enabled, samples=samples, id=identity_id
+            ))
+        self.identities = identities
+        if migrated_ids:
+            # Persist IDs for stable recapture targeting after future reloads.
+            # Save remains atomic and DPAPI-sealed.
+            self.save()
 
     def save(self) -> None:
         payload = {
             "version": 1,
             "model": "arcface-w600k_mbf-v1",
             "identities": [
-                {"name": i.name, "samples": [s.tolist() for s in i.samples]} for i in self.identities
+                {
+                    "id": i.id,
+                    "name": i.name,
+                    "enabled": i.enabled,
+                    "samples": [
+                        {"embedding": s.embedding.tolist(), "quality": s.quality}
+                        for s in i.samples
+                    ],
+                }
+                for i in self.identities
             ],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
+        self._write_payload_bytes(json.dumps(payload).encode("utf-8"))
 
-    def add_sample(self, name: str, embedding: np.ndarray) -> Identity:
+    def add_sample(self, name: str, embedding: np.ndarray, quality: float | None = None) -> Identity:
         identity = next((i for i in self.identities if i.name == name), None)
         if identity is None:
             identity = Identity(name=name)
             self.identities.append(identity)
-        identity.samples.append(embedding.astype(np.float32))
+        identity.samples.append(FaceSample(embedding.astype(np.float32), quality))
+        return identity
+
+    def replace_samples(self, identity_id: str, embeddings: list[np.ndarray],
+                        qualities: list[float | None] | None = None) -> Identity:
+        """Replace samples by stored identity ID (recapture is never an append)."""
+        identity = next((i for i in self.identities if i.id == identity_id), None)
+        if identity is None:
+            raise KeyError(f"no identity with id {identity_id}")
+        qualities = qualities or [None] * len(embeddings)
+        identity.samples = [
+            FaceSample(np.asarray(e, dtype=np.float32), q)
+            for e, q in zip(embeddings, qualities)
+        ]
         return identity
 
     def best_match(self, embedding: np.ndarray, threshold: float = DEFAULT_THRESHOLD):
@@ -336,10 +465,11 @@ class IdentityStore:
 
         That is FaceRecognitionPipeline.bestMatch: averaging can blur distinct
         appearances together, so the nearest single sample gets a veto.
+        Disabled identities are never matched.
         """
         best = None
         for identity in self.identities:
-            if not identity.samples:
+            if not identity.enabled or not identity.samples:
                 continue
             centroid, nearest = identity.score(embedding)
             if centroid >= threshold and nearest >= threshold:

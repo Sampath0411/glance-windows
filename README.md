@@ -41,9 +41,9 @@ the lock screen stays Windows' own.
 > Most Windows PCs don't have the infrared or depth sensors that make Windows Hello
 > trustworthy and secure. A normal webcam sees a flat 2D image. That means:
 >
-> - Glance prompts a forward → left → right → forward head turn and checks for likely
->   screen/print cues. These RGB-camera heuristics can still accept spoofs and occasionally
->   reject real users; head movement is not proof of a live person.
+> - Glance checks for natural facial movement and likely screen/print cues. These RGB-camera
+>   heuristics can still accept spoofs and occasionally reject real users; movement is not
+>   proof of a live person, and replay video may pass.
 > - Glance does not reliably defeat a video of you.
 > - Windows has no public API that lets a third-party app authorize a normal sign-in, so
 >   Glance installs a Credential Provider. After a face check, that provider submits your
@@ -65,6 +65,11 @@ the lock screen stays Windows' own.
 - Windows 11 x64
 - A webcam
 - Administrator approval for installation and for enabling the credential provider
+
+The installer checks Windows 11 build 22000 or newer, x64 architecture, and administrator
+approval. Glance repeats the OS/architecture check at launch and shows a blocking compatibility
+message on unsupported PCs. Missing face models, camera access, or account setup are recoverable
+setup issues: the app stays open so you can repair them, while face unlock remains fail-closed.
 
 Run `GlanceSetup.exe` and follow the prompts. Glance installs its protected components
 under `%ProgramFiles%\Glance`; the app and face agent themselves run unelevated. The
@@ -178,14 +183,15 @@ reported as a missing `--account`, not as a password problem.
 
 ## How it works
 
-1. Launch the app and follow onboarding. Verify and save your Windows password first;
+1. Launch the app and follow the setup guide in About. Verify and save your Windows password first;
    Glance needs it before it can enroll a face.
 2. Capture several samples, turning your head slightly between them. Each frame becomes a
    512-number *embedding* — a mathematical fingerprint — and the image is thrown away.
-3. When Windows locks, the face agent starts the camera and looks for an enrolled face —
-   any enrolled person, or one selected person.
-4. If the face is recognized — and the liveness checks agree you're a real person — the agent
-   writes a short-lived, HMAC-signed grant bound to your account and logon session.
+3. When Windows locks, the face agent starts the camera and looks only for the explicitly
+   selected enrolled person. Missing or invalid selections fail closed.
+4. If the face is recognized and the motion/anti-spoof checks pass, the agent writes a
+   short-lived, HMAC-signed grant bound to your account and logon session. These checks do not
+   prove that a live person is present.
 5. The Glance credential provider verifies that grant and submits the stored password.
    Windows' normal password and PIN providers remain available.
 
@@ -206,11 +212,13 @@ At a glance:
 | **Native Windows** | A real Win32 window: frameless glass shell, grouped sidebar, custom caption buttons, edge resize, snap, and maximise. |
 | **Glass interface** | A painted aurora backdrop under translucent panels, glass setting groups, and Windows-style window controls. |
 | **Six focused screens** | General, Your Face, Password, Camera, Recognition, and About. |
-| **Camera & recognition** | Choose the camera, match threshold, verification timeout, and autostart behavior. |
-| **Guided enrollment** | Automatically collects and saves 18 quality-checked face samples, with gentle pose prompts and in-app capture feedback. |
+| **Camera & recognition** | Cameras listed by name (numeric fallback), per-display camera choices, a Display-on choice, match confidence stops (Less strict 0.58 / Default 0.63 / More strict 0.68) plus a fine threshold slider, detection distance Close/Default/Far, face detection duration (3–10 s), and separate window autostart. |
+| **Guided enrollment** | Automatically collects and saves 18 quality-checked face samples, with gentle pose prompts and per-identity on/off toggles, Recapture (replaces samples), Remove, and capture-quality percentages (face size, sharpness, lighting). |
 | **Idle auto-lock** | Optional keyboard/mouse inactivity lock, off by default, adjustable from 1 to 120 minutes (5 minutes by default). |
-| **Fail closed** | No enrolled faces, a missing credential, a stale grant, an unavailable camera or face model, or any provider error falls back to the normal Windows password tile. |
-| **Your data, your call** | Edit or delete your enrollment or stored password at any time. |
+| **Auto-lock session** | Settings session lifetime of 7/14/30 days or Never, separate from idle auto-lock, with a Session pill on General that locks/unlocks the session with a face check. |
+| **Unlock animation** | Show/hide the animation, Original or Minimal style (in-app only; never shown on the lock screen). |
+| **Fail closed** | No enrolled faces, every identity disabled, a missing credential, a stale grant, an unavailable camera or face model, a failed face-unseal, or any provider error falls back to the normal Windows password tile. |
+| **Your data, your call** | Edit, disable, recapture, or delete your enrollment at any time; Change or Remove the stored password (Remove keeps face unlock installed). |
 | **Local by design** | Recognition and liveness run on-device. No face data, camera frames, or credentials are sent to a server. |
 
 ---
@@ -234,11 +242,12 @@ Optional **Auto-lock when idle** is in General settings. It is off by default an
 keyboard/mouse inactivity while background protection is running. After an idle-triggered
 lock, a fresh key press or mouse movement is required before face verification starts.
 
-Embeddings are stored locally in `%LOCALAPPDATA%\Glance\data\identities.json` and protected
-by your Windows profile's file permissions. This build does **not** encrypt the embedding
-file. A 512-number embedding is not an image and cannot be turned back into one, but it is
-still biometric data: use a Windows account with a strong password, and delete the file if
-you stop using Glance.
+Embeddings are stored locally in `%LOCALAPPDATA%\Glance\data\identities.json`, sealed with
+**DPAPI at user scope** — the file on disk is a DPAPI blob that only the Windows account that
+created it can open. Legacy plaintext identity files are migrated automatically on first read
+(a `.bak` copy is kept before sealing). A 512-number embedding is not an image and cannot be
+turned back into one, but it is still biometric data: use a Windows account with a strong
+password, and delete the file if you stop using Glance.
 
 ### Credentials
 
@@ -254,7 +263,7 @@ a narrower ACL is future hardening work. Treat Glance as convenience software, n
 Glance won't submit your password simply because a face matches. An unlock requires all of
 the following:
 
-1. An enrolled face is authorized — any enrolled person, or the selected person in single-person mode.
+1. The explicitly selected enrolled face is authorized. A missing, disabled, or invalid selection cannot unlock Windows.
 2. The PC is actually locked.
 3. A face matches above the configured similarity threshold.
 4. Liveness checks accept the detected face.
@@ -271,11 +280,11 @@ Runtime. Glance does not send face data, camera frames, or credentials to a serv
 
 ### How it tells a face from a photo
 
-Four possible-spoof cues and a head-turn challenge are evaluated over a rolling window. They are
+Four possible-spoof cues and a natural facial micro-motion check are evaluated over a rolling window. They are
 not averaged into a single score:
 
 - **Spoof cues** can indicate a screen or print, but are not conclusive. A repeated, confident
-  cue fails the scan and overrides the head-turn challenge. A cue can also be triggered by ordinary
+  cue fails the scan and overrides the motion check. A cue can also be triggered by ordinary
   lighting or background geometry, so the app asks the user to adjust and retry rather than
   claiming it has proven a spoof:
   - **Glare** — one large flat specular blob where a real face would show scattered skin
@@ -288,21 +297,19 @@ not averaged into a single score:
   - **Print or moiré texture** — a periodic pattern in the face crop, from a photographed
     display pixel grid or a printed halftone. The cue only fires when that pattern is actually
     visible, so smooth skin and soft lighting gradients do not trip it.
-- **Head-turn challenge** — the camera records a forward baseline, then requires a left turn,
-  a right turn, and a return to forward pose over multiple frames. If pose measurements are
-  poor, the check asks the user to face the camera clearly and improve lighting. This detects
-  apparent movement only: a moved photo or replay video may still pass.
-- **Micro-motion is diagnostic only.** Phone movement and detector jitter can change
-  landmark ratios. Real-world testing exposed this bypass in 0.1.4, so movement no
-  longer authorizes access.
+- **Natural facial micro-motion** — Glance observes changes in normalized facial landmark
+  ratios over multiple frames. Detector noise can cause false results, and a moving photo or
+  replay video can produce apparent motion and pass. This is a weak motion-presence heuristic,
+  not proof of a live person.
 
-**Heavy** (the default) and **Strict** both require the head-turn sequence and reject repeated,
+**Heavy** (the default) and **Strict** both require natural facial micro-motion and reject repeated,
 confident spoof cues. In-app verification uses the same rule. Light mode is for CLI diagnostics
-only; the Windows verifier promotes it to Heavy. Missing or malformed settings use Heavy.
+only; the Windows verifier promotes it to Heavy. Missing or malformed settings use Heavy. The
+prompted head-turn sequence is not used by Windows unlock or in-app verification.
 
 These are RGB-camera heuristics, not a guarantee against photos or screens. Landmark noise,
-lighting, and face angle can prevent a real head turn from being recognized; a replay can
-contain the prompted motion. Synthetic tests do not establish real-world spoof resistance.
+lighting, and face angle can prevent real facial movement from being detected; replay video may
+contain similar movement. Synthetic tests do not establish real-world spoof resistance.
 Validate with real phones and prints; use a hardware-backed authentication system for stronger
 assurance.
 

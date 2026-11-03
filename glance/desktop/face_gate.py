@@ -11,13 +11,25 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
+from .. import protection_state
 from . import backend
 from .capture_widgets import ScanAnimation
 from .theme import ACCENT, DANGER
 
-SCAN_SECONDS = 20.0
+SCAN_SECONDS = 5.0
+SCAN_SECONDS_MIN = 3
+SCAN_SECONDS_MAX = 10
 REQUIRED_MATCHES = 3
 SUCCESS_HOLD_MS = 1100
+
+
+def resolve_scan_seconds(settings) -> float:
+    """The in-app face-check scan window, clamped to the 3-10 s range."""
+    value = getattr(settings, "face_detection_seconds", SCAN_SECONDS)
+    try:
+        return float(max(SCAN_SECONDS_MIN, min(SCAN_SECONDS_MAX, float(value))))
+    except (TypeError, ValueError):
+        return SCAN_SECONDS
 
 
 class FaceGateDialog(QDialog):
@@ -45,6 +57,12 @@ class FaceGateDialog(QDialog):
         self._streak_name = ""
         self._streak = 0
         self.matched_name = ""
+        self._auto_retried = False
+        settings = getattr(parent, "settings", None)
+        self.scan_seconds = resolve_scan_seconds(settings)
+        self.auto_retry_once = bool(getattr(settings, "auto_retry_once", False))
+        self.show_animation = bool(getattr(settings, "animation_enabled", True))
+        self.animation_style = getattr(settings, "animation_style", "original")
 
         self.setWindowTitle("Face check")
         self.setModal(True)
@@ -67,6 +85,9 @@ class FaceGateDialog(QDialog):
         layout.addWidget(self.purpose_label)
 
         self.animation = ScanAnimation(size=148, art=112, radius=34)
+        self.animation.set_style(
+            self.animation_style if self.show_animation else "minimal"
+        )
         layout.addWidget(self.animation, 0, Qt.AlignHCenter)
 
         self.status = QLabel("Looking for your face…")
@@ -99,7 +120,7 @@ class FaceGateDialog(QDialog):
 
         self._scan_timer = QTimer(self)
         self._scan_timer.setSingleShot(True)
-        self._scan_timer.setInterval(int(SCAN_SECONDS * 1000))
+        self._scan_timer.setInterval(int(self.scan_seconds * 1000))
         self._scan_timer.timeout.connect(self._timed_out)
 
         self._accept_timer = QTimer(self)
@@ -170,7 +191,16 @@ class FaceGateDialog(QDialog):
         self.status.setStyleSheet("")
         self.hint.setText("")
 
-        if not backend.identity_summary(0):
+        if protection_state.session_is_unlocked():
+            self._succeed("Session")
+            return
+
+        try:
+            enrolled = backend.identity_summary(0)
+        except RuntimeError as error:
+            self._fail(str(error), retry=False)
+            return
+        if not enrolled:
             self._fail("No faces are enrolled on this PC. Enroll a face first.",
                        retry=False)
             return
@@ -180,7 +210,7 @@ class FaceGateDialog(QDialog):
             return
 
         self._scanning = True
-        self.status.setText("Face forward to begin the head-turn check")
+        self.status.setText("Look toward the camera and move naturally")
         self._hold_camera()
         self.camera.set_gate(True)
         self._scan_timer.start()
@@ -220,7 +250,7 @@ class FaceGateDialog(QDialog):
         self._streak = 0
         self.status.setText("Camera check")
         self.status.setStyleSheet("")
-        self.hint.setText(hint or "Face forward, then turn left and right")
+        self.hint.setText(hint or "Stay visible and move naturally")
 
     def _on_camera_failed(self, message: str) -> None:
         if self._scanning:
@@ -251,6 +281,14 @@ class FaceGateDialog(QDialog):
         self.use_password.setVisible(self._password_fallback is not None)
         self.cancel.setEnabled(True)
         self._stop_gate()
+        if (
+            retry
+            and self.auto_retry_once
+            and not self._auto_retried
+        ):
+            # Exactly one automatic retry, then the manual button takes over.
+            self._auto_retried = True
+            QTimer.singleShot(600, self._retry)
 
     def _use_password(self) -> None:
         if self._scanning or self._password_fallback is None:

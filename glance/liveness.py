@@ -10,7 +10,7 @@ copying exactly, because it is unusually well thought out:
   * firing is latched per scan, and counting is cumulative not consecutive,
     so a single-frame landmark dropout doesn't reset progress
   * Light mode  = deny only, "confirmed unless proven wrong"  <- diagnostics only
-  * Heavy/Strict = deny cues, plus a forward→left→right→forward head-turn challenge
+  * Heavy/Strict = deny cues, plus sustained natural facial micro-motion
 
 Implemented deny cues:
   * glossGlare       - one flat specular blob instead of scattered skin glints
@@ -22,7 +22,8 @@ Implemented deny cues:
 
 Implemented confirm cues:
   * headTurn          - ordered relative pose change: forward, left, right, forward
-  * blink/microMotion - retained for diagnostics only; never authorization cues
+  * blink - diagnostics only; never an authorization cue
+  * microMotion - noisy natural facial landmark variation; weaker than a prompted challenge
 
 Head pose limitation:
   * The SCRFD landmark yaw proxy can guide this prompted challenge but cannot
@@ -216,7 +217,7 @@ class Snapshot:
         """Describe the required proof of life for user-facing logs."""
         if self.decision is Decision.CONFIRMED:
             return "confirmed"
-        return "waiting for forward → left → right → forward head turn"
+        return "waiting for natural facial movement"
 
 
 class LivenessEvaluator:
@@ -259,8 +260,8 @@ class LivenessEvaluator:
             if self.mode is LivenessMode.LIGHT:
                 if self.frames_observed >= self.tuning.light_mode_minimum_frames:
                     decision = Decision.CONFIRMED
-            elif Cue.HEAD_TURN in self.enabled_cues and self.states[Cue.HEAD_TURN].has_fired:
-                decision, confirmed_by = Decision.CONFIRMED, Cue.HEAD_TURN
+            elif Cue.MICRO_MOTION in self.enabled_cues and self.states[Cue.MICRO_MOTION].has_fired:
+                decision, confirmed_by = Decision.CONFIRMED, Cue.MICRO_MOTION
 
         return Snapshot(decision, denied_by, confirmed_by, self.states, self.frames_observed)
 
@@ -273,6 +274,18 @@ class GlareSample:
     crop_pixel_width: float
     specular_fraction: float
     specular_cluster_ratio: float
+
+
+def crop_to_face_bbox(frame: np.ndarray,
+                      bbox: tuple[float, float, float, float]) -> np.ndarray:
+    """Return only the detected face box, clipped to the source frame."""
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = (int(value) for value in bbox)
+    x1, x2 = max(0, x1), min(width, x2)
+    y1, y2 = max(0, y1), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return frame[0:0, 0:0]
+    return frame[y1:y2, x1:x2]
 
 
 SPECULAR_LUMA_FLOOR = 235.0

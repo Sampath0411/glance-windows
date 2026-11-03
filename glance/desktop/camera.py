@@ -51,6 +51,26 @@ class Capture:
     ok: bool = False
     message: str = ""
     pose: tuple[float, float] | None = None
+    quality: float | None = None
+
+
+def _ramp_01(value: float, floor: float, ceiling: float) -> float:
+    return float(min(max((value - floor) / max(ceiling - floor, 1e-4), 0.0), 1.0))
+
+
+def capture_quality(face_fraction: float, blur: float, brightness: float) -> float:
+    """Windows capture-quality score (0..1) recorded with each sample.
+
+    This is an honest engineering signal, not a security score: it combines the
+    face size (share of the frame), sharpness (Laplacian variance) and exposure
+    (mean luma) at capture time. Tiers: poor < 0.40, fair < 0.50, good
+    >= 0.50 (see ``glance/desktop/enrollment.py``). The UI labels it as
+    capture quality, never as an authentication-security measure.
+    """
+    size = _ramp_01(face_fraction, 0.02, 0.06)
+    sharp = _ramp_01(blur, 20.0, 80.0)
+    bright = 1.0 - _ramp_01(abs(brightness - 130.0), 0.0, 95.0)
+    return 0.5 * size + 0.3 * sharp + 0.2 * bright
 
 
 @dataclass
@@ -67,13 +87,13 @@ class _GateVerifier:
     def __init__(self):
         self.evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
         self.name = ""
-        self.head_turn_tracker = lv.HeadTurnTracker()
+        self.motion_history: list = []
         self.denial = ""
 
     def reset_identity(self):
         self.evaluator.reset()
         self.name = ""
-        self.head_turn_tracker.reset()
+        self.motion_history.clear()
 
     def verify(self, frame, face, aligned, name, score):
         if self.denial:
@@ -84,34 +104,32 @@ class _GateVerifier:
         if name != self.name:
             self.reset_identity()
             self.name = name
-        head_turn = self.head_turn_tracker.observe(
-            lv.extract_head_pose_sample(getattr(face, "kps", None))
-        )
+        landmarks = getattr(face, "kps", None)
+        interocular = lv.interocular_distance(landmarks)
+        ratios = lv.landmark_ratios(landmarks)
+        if ratios is not None:
+            self.motion_history.append(ratios)
+            del self.motion_history[:-12]
         x1, y1, x2, y2 = [int(value) for value in face.bbox]
         pad = int(.15 * max(x2 - x1, y2 - y1))
         crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
         snapshot = self.evaluator.observe(lv.readings(
-            glare=lv.extract_glare(crop),
+            glare=lv.extract_glare(lv.crop_to_face_bbox(frame, face.bbox)),
             device=lv.detect_device_rectangle(frame, tuple(face.bbox)),
             screen=lv.extract_screen_glow(frame, tuple(face.bbox)),
             texture=lv.extract_texture(crop),
-            head_turn=head_turn,
+            motion_history=self.motion_history,
+            interocular_px=interocular,
         ))
         if snapshot.decision is lv.Decision.DENIED:
             self.denial = snapshot.denial_reason() or "Liveness check failed"
             return "", 0.0, self.denial
         if snapshot.decision is lv.Decision.CONFIRMED:
             return name, score, ""
-        hints = {
-            "baseline": "Face forward to begin",
-            "left": "Turn your head left",
-            "right": "Turn your head right",
-            "return": "Face forward again",
-            "quality": "Move closer and face the camera in steady lighting",
-            "complete": "Head turn complete",
-        }
-        hint = hints.get(self.head_turn_tracker.phase, "Face forward, then turn left and right")
-        return "", 0.0, hint
+        return "", 0.0, (
+            "Stay visible and move naturally. Still photos may be rejected, but a moving "
+            "photo or replay video may pass this motion check."
+        )
 
 
 class CameraWorker(QThread):
@@ -343,8 +361,13 @@ class CameraWorker(QThread):
         else:
             small = frame
 
+        # Show a mirror-like selfie preview. Recognition, alignment, and embeddings
+        # continue to use the untouched source frame above this presentation layer.
+        small = cv2.flip(small, 1)
+        preview_width = small.shape[1]
         boxes = [
-            (x1 * scale, y1 * scale, x2 * scale, y2 * scale)
+            (preview_width - x2 * scale, y1 * scale,
+             preview_width - x1 * scale, y2 * scale)
             for (x1, y1, x2, y2) in (tuple(float(v) for v in face.bbox) for face in faces)
         ]
         return CameraWorker._to_image(small), FrameInfo(boxes, label, score, hint)
@@ -386,6 +409,7 @@ class CameraWorker(QThread):
         brightness = float(gray.mean())
         if not 35 <= brightness <= 225:
             return Capture(message="Use even lighting; avoid darkness or bright backlight")
+        quality = capture_quality(fraction, blur, brightness)
         embedding = pipeline.embedder.embed(aligned)
 
         score_name, score = "", 0.0
@@ -401,10 +425,10 @@ class CameraWorker(QThread):
                            message="The image is blurry - hold still")
         if blur < GOOD_BLUR:
             return Capture(embedding, fraction, blur, score_name, score, ok=True,
-                           message="Slightly blurry, but usable")
+                           message="Slightly blurry, but usable", quality=quality)
 
         return Capture(embedding, fraction, blur, score_name, score, ok=True,
-                       message="Good sample", pose=pose)
+                       message="Good sample", pose=pose, quality=quality)
 
     @staticmethod
     def _to_image(frame: np.ndarray) -> QImage:

@@ -5,12 +5,15 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from ctypes import wintypes
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, QPropertyAnimation
 from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -26,10 +29,10 @@ import time
 
 from .. import __version__
 from . import backend
+from . import system_check
 from .camera import CameraWorker
 from .face_gate import FaceGateDialog
 from .models_setup import ModelsDialog
-from .onboarding import FirstRunDialog
 from .pages import (
     AboutPage, CameraPage, Dashboard, EnrollPage, PasswordDialog,
     PasswordPage, WindowsPasswordFallbackDialog, RecognitionPage, Task,
@@ -37,14 +40,17 @@ from .pages import (
 from .. import protection_state
 from .recovery import should_recover_agent
 from .settings_widgets import FloatingTabBar
-from .navigation import Sidebar, WindowControls, style_native_window
+from .navigation import FloatingNavigation, WindowControls, style_native_window
 from .theme import (
     ACCENT,
     app_icon,
     backdrop_pixmap,
     resolve_theme,
     windows_appearance,
+    Dot,
 )
+from .splash import StartupSplash
+from .motion import motion_enabled
 from . import ui_state
 
 APP_MUTEX = "Local\\GlanceDesktop"
@@ -61,15 +67,18 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._compact_size = (1060, 780)
+        self._compact_size = (600, 800)
         self._enrollment_size = self._compact_size
         self.resize(*self._compact_size)
-        self.setMinimumSize(980, 720)
+        self.setMinimumSize(520, 650)
         self._backdrop_cache = None
         self._backdrop_key = None
 
         self.settings = backend.Settings.load()
         self._current_index = 0
+        self._motion_enabled = motion_enabled()
+        self._page_animation: QPropertyAnimation | None = None
+        self._page_effects: dict[int, QGraphicsOpacityEffect] = {}
         self._owners: set[str] = set()
         self._quitting = False
         self._agent_was_active_this_session = backend.agent_running()
@@ -80,12 +89,14 @@ class MainWindow(QMainWindow):
         self._camera_stop_timer.setInterval(250)
         self._camera_stop_timer.timeout.connect(self._stop_camera_if_unowned)
 
-        self.camera = CameraWorker(self.settings.camera, self.settings.threshold, self)
+        self.camera = CameraWorker(
+            self.settings.camera_index_for_display(), self.settings.threshold, self
+        )
         self.camera.failed.connect(self._camera_failed)
 
         central = QWidget()
         central.setObjectName("windowRoot")
-        self._root_layout = QHBoxLayout(central)
+        self._root_layout = QVBoxLayout(central)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
         self._root_layout.setSpacing(0)
 
@@ -103,32 +114,61 @@ class MainWindow(QMainWindow):
         )
         for page in self.pages:
             self.stack.addWidget(page)
-        self.nav = Sidebar(
-            (
-                ("", ("General",)),
-                ("Authentication", ("Your Face", "Password", "Camera", "Recognition")),
-                ("Glance", ("About",)),
-            ),
+        self.nav = FloatingNavigation(
+            ("General", "Your Face", "Password", "Camera", "Recognition", "About"),
             self,
         )
         self.nav.indexChanged.connect(self._navigate)
-        self._root_layout.addWidget(self.nav)
-        self._root_layout.addWidget(self.stack, 1)
-        self.setCentralWidget(central)
 
-        self.window_controls = WindowControls(central)
+        header = QFrame(central)
+        header.setObjectName("titleBar")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 10, 12, 8)
+        header_layout.setSpacing(9)
+        logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(36, 36))
+        logo.setFixedSize(24, 24)
+        header_layout.addWidget(logo)
+        title = QLabel("Glance")
+        title.setObjectName("brand")
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+
+        self.status_pill = QFrame(header)
+        self.status_pill.setObjectName("statusPill")
+        self.status_pill.setAttribute(Qt.WA_StyledBackground, True)
+        status_layout = QHBoxLayout(self.status_pill)
+        status_layout.setContentsMargins(9, 5, 10, 5)
+        status_layout.setSpacing(7)
+        self.chip_dot = Dot()
+        self.chip_label = QLabel("Checking…")
+        self.chip_label.setObjectName("statusText")
+        status_layout.addWidget(self.chip_dot)
+        status_layout.addWidget(self.chip_label)
+        self.nav.status_dot = self.chip_dot
+        self.nav.status_label = self.chip_label
+        header_layout.addWidget(self.status_pill)
+
+        self.window_controls = WindowControls(header)
         self.window_controls.closeRequested.connect(self.close)
         self.window_controls.minimizeRequested.connect(self.showMinimized)
         self.window_controls.zoomRequested.connect(self._toggle_zoom)
-        self.window_controls.raise_()
+        header_layout.addWidget(self.window_controls)
 
-        style_native_window(self)
+        self._root_layout.addWidget(header)
+        self._root_layout.addWidget(self.stack, 1)
+        nav_row = QHBoxLayout()
+        nav_row.setContentsMargins(12, 7, 12, 14)
+        nav_row.addStretch(1)
+        nav_row.addWidget(self.nav)
+        nav_row.addStretch(1)
+        self._root_layout.addLayout(nav_row)
+        self.setCentralWidget(central)
+
+        self._native_acrylic = style_native_window(self)
         self._apply_frame_mode()
 
-        self.chip_dot = self.nav.status_dot
-        self.chip_label = self.nav.status_label
         self.camera.ready.connect(self.enroll.on_camera_ready)
-        self.camera.preview.connect(self.dashboard.on_preview)
         self.camera.preview.connect(self.enroll.on_preview)
         self.camera.preview.connect(self.camera_page.on_preview)
         self.camera.captured.connect(self.enroll.on_capture)
@@ -158,10 +198,8 @@ class MainWindow(QMainWindow):
         controls = getattr(self, "window_controls", None)
         if controls is None:
             return
-        framed = not (self.isMaximized() or self.isFullScreen())
-        x = self.width() - (12 if framed else 8) - controls.width()
-        y = 6 if framed else 2
-        controls.move(max(0, x), max(0, y))
+        # Controls are managed by the compact title-bar layout.
+        controls.set_maximised(self.isMaximized() or self.isFullScreen())
 
     def _toggle_zoom(self) -> None:
         if self.isMaximized():
@@ -198,7 +236,10 @@ class MainWindow(QMainWindow):
         path.addRoundedRect(rect, radius, radius)
         painter.save()
         painter.setClipPath(path)
-        painter.drawPixmap(rect.topLeft(), self._backdrop(rect.size()))
+        if self._native_acrylic:
+            painter.fillPath(path, QColor(10, 22, 31, 54))
+        else:
+            painter.drawPixmap(rect.topLeft(), self._backdrop(rect.size()))
         painter.restore()
 
         painter.setBrush(Qt.NoBrush)
@@ -289,7 +330,6 @@ class MainWindow(QMainWindow):
             self.camera.start()
 
     def _camera_failed(self, message: str) -> None:
-        self.dashboard.preview.clear()
         self.enroll.on_camera_failed(message)
         self.camera_page.on_camera_failed(message)
         if self._tray is not None:
@@ -334,14 +374,43 @@ class MainWindow(QMainWindow):
         if purpose is not None and not self.request_face_gate(purpose):
             self.nav.set_current_index(self._current_index)
             return
+        previous_index = self._current_index
         self._current_index = index
         self.stack.setCurrentIndex(index)
         self.nav.set_current_index(index)
         self.window_controls.raise_()
+        self._transition_page(previous_index, index)
 
-    def show_first_run_if_needed(self) -> None:
-        if not FirstRunDialog.is_completed():
-            FirstRunDialog(self).exec()
+    def _transition_page(self, previous_index: int, index: int) -> None:
+        """Fade non-camera page content once; camera previews switch immediately."""
+        if self._page_animation is not None:
+            self._page_animation.stop()
+            self._page_animation.deleteLater()
+            self._page_animation = None
+        for effect in self._page_effects.values():
+            effect.setOpacity(1.0)
+        if (not self._motion_enabled or index == 3 or previous_index == 3
+                or previous_index == index):
+            return
+        page = self.stack.widget(index)
+        effect = self._page_effects.get(index)
+        if effect is None:
+            effect = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(effect)
+            self._page_effects[index] = effect
+        effect.setOpacity(0.82)
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setDuration(160)
+        animation.setStartValue(0.82)
+        animation.setEndValue(1.0)
+        animation.finished.connect(lambda: self._page_transition_finished(animation))
+        self._page_animation = animation
+        animation.start()
+
+    def _page_transition_finished(self, animation: QPropertyAnimation) -> None:
+        if self._page_animation is animation:
+            self._page_animation = None
+        animation.deleteLater()
 
     def show_whats_new_if_needed(self) -> None:
         if not ui_state.should_show_whats_new(__version__):
@@ -349,11 +418,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             f"What's new in Glance {__version__}",
-            "Windows unlock and in-app face checks now prompt a left, right, and "
-            "forward head turn. If it stalls, move closer and use steady front lighting. "
-            "Your Windows password is available as a fallback for in-app face checks. "
-            "RGB head-motion checks are not proof of a live person and may not detect "
-            "photo or video replays.",
+            "Camera and settings pages now keep their controls readable at compact "
+            "window sizes, and the acrylic background is more visible. Glare analysis "
+            "now ignores pixels outside the detected face. RGB-camera liveness checks "
+            "remain imperfect; a moving replay may pass. Keep your Windows password "
+            "and PIN available as fallbacks.",
         )
         ui_state.mark_whats_new_shown(__version__)
 
@@ -381,9 +450,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Glance", message)
 
     def startup_sequence(self) -> None:
-        """Ask for the downloadable face models, then show the setup guide."""
+        """Offer the model flow, then continue the normal startup checks."""
         ModelsDialog.ensure_models(self)
-        self.show_first_run_if_needed()
         self.show_whats_new_if_needed()
         self.offer_startup_if_needed()
 
@@ -396,6 +464,9 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.Yes:
             self.restart_agent()
+
+    def _apply_display_preference(self) -> None:
+        _apply_display_choice(self, self.settings)
 
     def settings_changed(self) -> None:
         if not backend.agent_running():
@@ -551,11 +622,69 @@ def build_tray(window: MainWindow) -> QSystemTrayIcon:
     return tray
 
 
-def claim_instance() -> bool:
-    handle = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
+_kernel32_checked = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32_checked.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32_checked.CreateMutexW.restype = wintypes.HANDLE
+
+# Kept alive for the life of the process so the mutex stays held; closing or
+# dropping this handle would let a second instance in.
+_instance_mutex = None
+
+
+def _acquire_mutex(name: str) -> bool:
+    """Return True when this process is the sole holder of ``name``.
+
+    use_last_error=True makes ctypes snapshot the error code immediately after
+    the call, so ERROR_ALREADY_EXISTS can be trusted here. Without it the code
+    always reads stale error 0 and a second instance is let in. Zeroing the
+    slot first matters too: Win32 does not clear GetLastError on success, so
+    without this a fresh creation could read a stale error from an unrelated
+    earlier call.
+    """
+    global _instance_mutex
+    ctypes.set_last_error(0)
+    handle = _kernel32_checked.CreateMutexW(None, False, name)
     if not handle:
+        return True  # cannot tell - being able to open the app matters more than tidiness
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        _kernel32_checked.CloseHandle(handle)
+        return False
+    _instance_mutex = handle
+    return True
+
+
+def claim_instance() -> bool:
+    return _acquire_mutex(APP_MUTEX)
+
+
+def create_and_show_main_window(app: QApplication) -> MainWindow:
+    """Show the bounded splash while the native window is constructed."""
+    splash = StartupSplash()
+    splash.show()
+    app.processEvents()
+    try:
+        window = MainWindow()
+        build_tray(window)
+        window.show()
+    except BaseException:
+        splash.close()
+        raise
+    splash.finish(window)
+    return window
+
+
+def ensure_compatible_pc() -> bool:
+    """Show a clear blocking message only for unsupported OS/architecture."""
+    result = system_check.check_current_system()
+    if result.supported:
         return True
-    return ctypes.get_last_error() != 183
+    detail = "\n".join(result.blockers)
+    QMessageBox.critical(
+        None,
+        "Glance can’t run on this PC",
+        f"This app can’t run on this PC.\n\n{detail}",
+    )
+    return False
 
 
 def main() -> int:
@@ -574,16 +703,36 @@ def main() -> int:
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(resolve_theme("dark").stylesheet)
+    if not ensure_compatible_pc():
+        return 1
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Glance.Desktop")
     except (AttributeError, OSError):
         pass  # Older shells still show the executable's embedded icon.
 
-    window = MainWindow()
-    build_tray(window)
-    window.show()
+    window = create_and_show_main_window(app)
+    _apply_display_choice(window, window.settings)
     QTimer.singleShot(250, window.startup_sequence)
     return app.exec()
+
+
+def _apply_display_choice(window, settings) -> None:
+    """Best-effort placement of the app window on the chosen display.
+
+    "Main display" is the primary screen; "external" prefers the last
+    non-primary screen when one exists, and falls back to the primary.
+    """
+    try:
+        screens = QApplication.screens()
+        if not screens:
+            return
+        if settings.display_choice == "external" and len(screens) > 1:
+            target = screens[-1]
+        else:
+            target = screens[0]
+        window.windowHandle().setScreen(target)
+    except Exception:  # noqa: BLE001 - placement is cosmetic; never fail startup
+        pass
 
 
 if __name__ == "__main__":

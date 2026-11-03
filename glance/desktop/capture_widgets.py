@@ -1,11 +1,12 @@
 """Compact capture cards and silent playback of the original Mac animation assets."""
 import cv2
-from PySide6.QtCore import QElapsedTimer, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
+from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 from ..paths import resolve_paths
-from .enrollment import TARGET
+from .enrollment import TARGET, quality_percent, quality_tier
+from .theme import ACCENT
 
 _loader = None
 _clips = None
@@ -50,8 +51,12 @@ class AnimationLoader(QThread):
 
 
 class ScanAnimation(QWidget):
-    """One-shot native-timing playback; holds the final frame and never plays sound."""
-    def __init__(self, parent=None, size=80, art=64, radius=16):
+    """One-shot native-timing playback; holds the final frame and never plays sound.
+
+    ``style`` is "original" (video playback) or "minimal" (a simple static
+    state icon). When video is disabled the minimal icon is always used.
+    """
+    def __init__(self, parent=None, size=80, art=64, radius=16, style="original"):
         super().__init__(parent)
         self._art = art
         self._radius = radius
@@ -63,6 +68,7 @@ class ScanAnimation(QWidget):
         self.current_frame = QImage()
         self.clips = {}
         self.state = "idle"
+        self.style = "minimal" if style != "original" else "original"
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
         self.timer.setInterval(16)
@@ -70,6 +76,45 @@ class ScanAnimation(QWidget):
         self.root = root
         self._load_connected = False
         self.show_state("idle")
+
+    def set_style(self, style: str) -> None:
+        self.style = "minimal" if style != "original" else "original"
+        if self.style == "minimal":
+            self.timer.stop()
+            self.current_frame = QImage()
+        self.update()
+
+    def _paint_minimal(self, painter: QPainter) -> None:
+        center = self.rect().center()
+        radius = min(self.width(), self.height()) / 2 - 4
+        outlined = QColor("#dcecff")
+        outlined.setAlpha(90)
+        painter.setPen(QPen(outlined, 2.5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(center, radius, radius)
+        if self.state == "success":
+            pen = QPen(QColor(94, 220, 120), 3)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(QPolygonF([
+                QPointF(center.x() - radius * 0.42, center.y()),
+                QPointF(center.x() - radius * 0.12, center.y() + radius * 0.34),
+                QPointF(center.x() + radius * 0.45, center.y() - radius * 0.30),
+            ]))
+        elif self.state == "failure":
+            color = QColor("#ff6b6b")
+            painter.setPen(QPen(color, 3))
+            off = radius * 0.32
+            painter.drawLine(QPointF(center.x() - off, center.y() - off),
+                            QPointF(center.x() + off, center.y() + off))
+            painter.drawLine(QPointF(center.x() - off, center.y() + off),
+                            QPointF(center.x() + off, center.y() - off))
+        else:
+            inner = QColor(ACCENT)
+            inner.setAlpha(150)
+            painter.setPen(QPen(inner, 2.5))
+            painter.drawEllipse(center, radius * 0.55, radius * 0.55)
 
     def paintEvent(self, event):  # noqa: N802
         painter = QPainter(self)
@@ -82,16 +127,19 @@ class ScanAnimation(QWidget):
         path = QPainterPath()
         path.addRoundedRect(self.rect(), self._radius, self._radius)
         painter.setClipPath(path)
-        image = self.current_frame if not self.current_frame.isNull() else self.still
-        if not image.isNull():
-            side = min(self._art, self.width(), self.height())
-            scaled = image.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            painter.drawImage((self.width() - scaled.width()) / 2,
-                              (self.height() - scaled.height()) / 2, scaled)
+        if self.style == "minimal":
+            self._paint_minimal(painter)
         else:
-            painter.setPen(QColor("#dcecff"))
-            painter.drawText(self.rect(), Qt.AlignCenter,
-                             {"success": "✓", "failure": "Retry"}.get(self.state, "Scanning"))
+            image = self.current_frame if not self.current_frame.isNull() else self.still
+            if not image.isNull():
+                side = min(self._art, self.width(), self.height())
+                scaled = image.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                painter.drawImage((self.width() - scaled.width()) / 2,
+                                  (self.height() - scaled.height()) / 2, scaled)
+            else:
+                painter.setPen(QColor("#dcecff"))
+                painter.drawText(self.rect(), Qt.AlignCenter,
+                                 {"success": "✓", "failure": "Retry"}.get(self.state, "Scanning"))
         painter.restore()
 
     def showEvent(self, event):  # noqa: N802
@@ -121,6 +169,10 @@ class ScanAnimation(QWidget):
     def show_state(self, state):
         self.state = state
         self.timer.stop()
+        if self.style == "minimal":
+            self.current_frame = QImage()
+            self.update()
+            return
         frames, _ = self.clips.get(state, ([], 60))
         if not frames:
             self.current_frame = QImage()
@@ -146,17 +198,29 @@ class ScanAnimation(QWidget):
         super().hideEvent(event)
 
 
+_TIER_COLORS = {
+    "poor": QColor(255, 107, 107),
+    "fair": QColor(230, 185, 92),
+    "good": QColor(94, 220, 120),
+}
+
+
 class CaptureBars(QWidget):
-    def __init__(self, count=0, parent=None):
+    """One colored tick per sample slot; unrated ticks are hollow/dim."""
+
+    def __init__(self, qualities=None, parent=None):
         super().__init__(parent)
-        self.count = count
+        self.qualities = list(qualities or [])
         self.setFixedHeight(26)
         self.setMinimumWidth(155)
 
-    def set_count(self, count):
-        self.count = max(0, min(TARGET, count))
-        self.setAccessibleName(f"{self.count} of {TARGET} samples")
+    def set_samples(self, qualities):
+        self.qualities = list(qualities or [])
+        self.setAccessibleName(f"{len(self.qualities)} of {TARGET} samples")
         self.update()
+
+    def set_count(self, count):
+        self.set_samples([None] * max(0, min(TARGET, count)))
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -164,14 +228,20 @@ class CaptureBars(QWidget):
         p.setPen(Qt.NoPen)
         step = min(9, self.width() / TARGET)
         for i in range(TARGET):
-            color = QColor.fromHsvF(i / (TARGET - 1) * .36, .66, .97)
-            color.setAlpha(255 if i < self.count else 48)
-            p.setBrush(color)
-            p.drawRoundedRect(QRectF(i * step, 3, 3.5, 21), 1.7, 1.7)
+            rect = QRectF(i * step, 3, 3.5, 21)
+            if i < len(self.qualities):
+                tier = quality_tier(self.qualities[i])
+                color = _TIER_COLORS.get(tier, QColor(150, 165, 190))
+                color.setAlpha(255 if tier else 110)
+                p.setBrush(color)
+                p.drawRoundedRect(rect, 1.7, 1.7)
+            else:
+                p.setBrush(QColor(255, 255, 255, 22))
+                p.drawRoundedRect(rect, 1.7, 1.7)
 
 
 class IdentityCaptureCard(QFrame):
-    def __init__(self, name, count=0, parent=None):
+    def __init__(self, name, samples=None, parent=None):
         super().__init__(parent)
         self.setObjectName("identityCaptureCard")
         layout = QVBoxLayout(self)
@@ -185,11 +255,21 @@ class IdentityCaptureCard(QFrame):
         layout.addWidget(self.detail)
         self.bars = CaptureBars()
         layout.addWidget(self.bars)
-        self.set_count(count)
+        self.set_samples(samples or [])
 
-    def set_count(self, count):
-        shown = min(TARGET, count)
-        level = "low" if shown < 6 else "building" if shown < TARGET else "complete"
-        self.detail.setText(f"Capture quality · {shown}/{TARGET} {level}")
-        self.setToolTip("Sample coverage, not a measure of authentication security.")
-        self.bars.set_count(shown)
+    def set_samples(self, qualities):
+        self.bars.set_samples(qualities)
+        total = len(qualities)
+        percent = quality_percent(qualities)
+        if percent is None:
+            self.detail.setText(f"Capture quality · {total}/{TARGET} not recorded")
+            self.setToolTip(
+                "Samples saved before capture quality existed. "
+                "Capture quality is not a measure of authentication security."
+            )
+        else:
+            self.detail.setText(f"Capture quality • {percent}% · {total}/{TARGET}")
+            self.setToolTip(
+                "Capture quality at capture time (face size, sharpness, "
+                "lighting). Not a measure of authentication security."
+            )

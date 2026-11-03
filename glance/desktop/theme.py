@@ -32,6 +32,8 @@ ACCENT = "#4c9dff"
 WARN = "#e6b95c"
 DANGER = "#ff6b6b"
 BLUE = "#4c9dff"
+ACRYLIC_TINT_ALPHA = 0x58
+ACRYLIC_TINT_COLOR = (ACRYLIC_TINT_ALPHA << 24) | 0x002A241C
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,29 @@ QFrame#sidebar {
 QFrame#sidebar[framed="false"] {
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
+}
+QFrame#titleBar { background: transparent; border: none; }
+QWidget#windowRoot, QStackedWidget { background: transparent; border: none; }
+QFrame#floatingNavigation {
+    background: rgba(10, 20, 30, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 27px;
+}
+QPushButton#compactNav { background: transparent; border: none; padding: 0; }
+QWidget#compactModePicker {
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QPushButton#compactModeOption {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 5px 12px;
+}
+QPushButton#compactModeOption:checked {
+    background: rgba(76, 157, 255, 0.22);
+    border-color: rgba(76, 157, 255, 0.68);
 }
 QFrame#statusPill {
     background: $surface;
