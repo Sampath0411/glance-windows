@@ -37,6 +37,9 @@ class SettingsGroup(QFrame):
         if self.column.count():
             self.column.addWidget(SettingsDivider())
         self.column.addWidget(row)
+        self.column.invalidate()
+        self.updateGeometry()
+        self.setMinimumHeight(max(self.sizeHint().height(), self.minimumSizeHint().height()))
 
 
 class SettingsDivider(QFrame):
@@ -53,6 +56,7 @@ class SettingsRow(QWidget):
                  parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("settingsRow")
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 15, 16, 15)
         row.setSpacing(12)

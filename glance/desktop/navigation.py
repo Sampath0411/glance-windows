@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .theme import MUTED, app_icon
+from .theme import ACRYLIC_TINT_COLOR, MUTED, app_icon
 
 
 def navigation_icon(index: int, color: str = MUTED) -> QIcon:
@@ -401,7 +401,7 @@ def style_native_window(window):
                 ("size", ctypes.c_size_t),
             ]
 
-        policy = AccentPolicy(4, 2, 0xB82A241C, 0)  # acrylic blur with blue-teal tint
+        policy = AccentPolicy(4, 2, ACRYLIC_TINT_COLOR, 0)  # lighter acrylic blur tint
         data = WindowCompositionAttributeData(19, ctypes.addressof(policy), ctypes.sizeof(policy))
         activate = ctypes.windll.user32.SetWindowCompositionAttribute
         activate.argtypes = [wintypes.HWND, ctypes.POINTER(WindowCompositionAttributeData)]

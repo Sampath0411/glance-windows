@@ -32,6 +32,8 @@ ACCENT = "#4c9dff"
 WARN = "#e6b95c"
 DANGER = "#ff6b6b"
 BLUE = "#4c9dff"
+ACRYLIC_TINT_ALPHA = 0x58
+ACRYLIC_TINT_COLOR = (ACRYLIC_TINT_ALPHA << 24) | 0x002A241C
 
 
 @dataclass(frozen=True)
@@ -149,8 +151,9 @@ QFrame#sidebar[framed="false"] {
     border-bottom-left-radius: 0;
 }
 QFrame#titleBar { background: transparent; border: none; }
+QWidget#windowRoot, QStackedWidget { background: transparent; border: none; }
 QFrame#floatingNavigation {
-    background: rgba(10, 20, 30, 0.76);
+    background: rgba(10, 20, 30, 0.58);
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 27px;
 }

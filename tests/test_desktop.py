@@ -17,7 +17,10 @@ from unittest.mock import patch
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QFrame, QLabel, QMessageBox, QPushButton, QScrollArea,
+    QWidget,
+)
 
 import glance.agent.glance_agent as glance_agent
 import glance.desktop.backend as backend
@@ -238,7 +241,7 @@ class AdaptiveThemeTests(unittest.TestCase):
         window.show()
         try:
             self.app.processEvents()
-            for index in (0, 1, 2):
+            for index in (0, 1, 2, 3):
                 window.stack.setCurrentIndex(index)
                 self.app.processEvents()
                 page = window.pages[index]
@@ -254,6 +257,53 @@ class AdaptiveThemeTests(unittest.TestCase):
                 )
         finally:
             window.close()
+
+    def test_camera_page_scrolls_instead_of_compressing_settings_above_navigation(self) -> None:
+        window = MainWindow()
+        window.setStyleSheet(theme.resolve_theme("dark").stylesheet)
+        window.resize(600, 650)
+        window.show()
+        try:
+            self.app.processEvents()
+            page = window.camera_page
+            area = page.findChild(QScrollArea)
+            self.assertIsNotNone(area, "camera controls and preview should live in a scroll area")
+
+            group = area.widget().findChild(QFrame, "settingsGroup")
+            self.assertIsNotNone(group)
+            self.assertGreaterEqual(group.height(), group.sizeHint().height())
+            nav_top = window.nav.mapTo(window.centralWidget(), window.nav.rect().topLeft()).y()
+            stack_bottom = window.stack.geometry().bottom()
+            self.assertLess(stack_bottom, nav_top, "page viewport must end above the bottom nav")
+            nav_bottom = nav_top + window.nav.height()
+            self.assertLess(nav_bottom, window.centralWidget().height(),
+                            "bottom window border must remain below the navigation capsule")
+        finally:
+            window.close()
+
+    def test_settings_groups_keep_their_content_height_while_scrolling(self) -> None:
+        window = MainWindow()
+        window.setStyleSheet(theme.resolve_theme("dark").stylesheet)
+        window.resize(1345, 650)
+        window.show()
+        try:
+            self.app.processEvents()
+            area = window.dashboard.findChild(QScrollArea)
+            self.assertIsNotNone(area)
+            groups = area.widget().findChildren(QFrame, "settingsGroup")
+            self.assertTrue(groups)
+            for group in groups:
+                self.assertGreaterEqual(
+                    group.height(), group.sizeHint().height(),
+                    "settings group border must enclose its rows instead of collapsing at viewport edge",
+                )
+        finally:
+            window.close()
+
+    def test_acrylic_tint_is_translucent_enough_to_reveal_desktop_blur(self) -> None:
+        alpha = theme.ACRYLIC_TINT_ALPHA
+        self.assertLessEqual(alpha, 0x70)
+        self.assertGreaterEqual(alpha, 0x40)
 
     def test_settings_row_accepts_a_subtitle_set_after_construction(self) -> None:
         row = SettingsRow("InsightFace buffalo_s", "")

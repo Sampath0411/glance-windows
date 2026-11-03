@@ -418,9 +418,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             f"What's new in Glance {__version__}",
-            "Windows unlock and in-app face checks now look for natural facial "
-            "movement. This motion check is imperfect and a moving replay may pass. "
-            "Your Windows password remains available as a fallback for in-app face checks.",
+            "Camera and settings pages now keep their controls readable at compact "
+            "window sizes, and the acrylic background is more visible. Glare analysis "
+            "now ignores pixels outside the detected face. RGB-camera liveness checks "
+            "remain imperfect; a moving replay may pass. Keep your Windows password "
+            "and PIN available as fallbacks.",
         )
         ui_state.mark_whats_new_shown(__version__)
 

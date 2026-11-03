@@ -1480,7 +1480,8 @@ class CameraPage(QWidget):
     def __init__(self, window):
         super().__init__()
         self.window = window
-        layout = QVBoxLayout(self)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(34, 28, 34, 28)
         layout.setSpacing(14)
         layout.addWidget(_page_header(
@@ -1532,6 +1533,10 @@ class CameraPage(QWidget):
         layout.addWidget(self.preview, 1)
         self.status = _muted("")
         layout.addWidget(self.status)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(_scrollable(inner))
 
     def _camera_select(self) -> Select:
         select = Select()
