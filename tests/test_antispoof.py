@@ -523,6 +523,18 @@ class DesktopLivenessTests(unittest.TestCase):
         self.assertIn("may pass", hint.lower())
         self.assertNotIn("cannot pass", hint.lower())
 
+    def test_glare_crop_uses_face_box_not_padding(self):
+        seen = []
+
+        def record(crop):
+            seen.append(crop.shape)
+            return None
+
+        with patch.object(lv, "extract_glare", side_effect=record):
+            self.gate.verify(self.frame, self.face, self.open, "Sampath", .9)
+
+        self.assertEqual(seen[0], (150, 120, 3))
+
     def test_identity_change_cannot_inherit_motion_progress(self):
         for amount in (0.0, 1.0, 3.0, 7.0, 12.0):
             self.face.kps[3, 0] = 130.0 - amount
@@ -556,6 +568,39 @@ class AgentIntegrationTests(unittest.TestCase):
             identity="Sampath", paths=SimpleNamespace(identities_path=Path("x")),
         )
         self.assertIs(verifier.liveness, lv.LivenessMode.HEAVY)
+
+    def test_agent_glare_crop_uses_face_box_not_padding(self):
+        seen = []
+
+        def record(crop):
+            seen.append(crop.shape)
+            return None
+
+        with patch.object(lv, "extract_glare", side_effect=record):
+            _run_verifier([_synthetic_aligned(open_eye=True)], frames=1)
+
+        self.assertEqual(seen[0], (150, 120, 3))
+
+
+class FaceBoxGlareCropTests(unittest.TestCase):
+    def test_bright_border_outside_face_box_does_not_trip_glare(self):
+        frame = np.full((100, 100, 3), 255, dtype=np.uint8)
+        frame[20:80, 20:80] = (80, 100, 120)
+
+        crop = lv.crop_to_face_bbox(frame, (20, 20, 80, 80))
+        reading = lv.gloss_glare_reading(lv.extract_glare(crop))
+
+        self.assertLess(reading.level, lv.LivenessTuning().gloss_level)
+
+    def test_specular_patch_inside_face_box_still_trips_glare(self):
+        frame = np.full((100, 100, 3), (80, 100, 120), dtype=np.uint8)
+        frame[20:80, 20:80] = (80, 100, 120)
+        frame[35:55, 35:55] = (255, 255, 255)
+
+        crop = lv.crop_to_face_bbox(frame, (20, 20, 80, 80))
+        reading = lv.gloss_glare_reading(lv.extract_glare(crop))
+
+        self.assertGreaterEqual(reading.level, lv.LivenessTuning().gloss_level)
 
     def test_motion_in_a_replay_can_pass_so_disclosure_is_required(self):
         result, writer = _run_verifier(

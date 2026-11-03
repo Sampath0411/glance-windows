@@ -114,7 +114,7 @@ class _GateVerifier:
         pad = int(.15 * max(x2 - x1, y2 - y1))
         crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
         snapshot = self.evaluator.observe(lv.readings(
-            glare=lv.extract_glare(crop),
+            glare=lv.extract_glare(lv.crop_to_face_bbox(frame, face.bbox)),
             device=lv.detect_device_rectangle(frame, tuple(face.bbox)),
             screen=lv.extract_screen_glow(frame, tuple(face.bbox)),
             texture=lv.extract_texture(crop),

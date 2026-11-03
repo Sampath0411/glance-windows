@@ -276,6 +276,18 @@ class GlareSample:
     specular_cluster_ratio: float
 
 
+def crop_to_face_bbox(frame: np.ndarray,
+                      bbox: tuple[float, float, float, float]) -> np.ndarray:
+    """Return only the detected face box, clipped to the source frame."""
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = (int(value) for value in bbox)
+    x1, x2 = max(0, x1), min(width, x2)
+    y1, y2 = max(0, y1), min(height, y2)
+    if x2 <= x1 or y2 <= y1:
+        return frame[0:0, 0:0]
+    return frame[y1:y2, x1:x2]
+
+
 SPECULAR_LUMA_FLOOR = 235.0
 SPECULAR_CHROMA_TOLERANCE = 10.0
 CLUSTER_GRID_SIZE = 8
