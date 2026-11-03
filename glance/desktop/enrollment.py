@@ -27,19 +27,15 @@ def quality_tier(quality: float | None) -> str | None:
 def quality_percent(qualities) -> int | None:
     """Share of samples that are NOT poor, as a rounded percentage (Mac formula).
 
-    ``(total - poorCount) / total * 100``. Unrated samples never count as poor;
-    with no rated samples at all there is nothing to report.
+    ``(total - poorCount) / total * 100``. Unrated samples are included in
+    the total and never counted as poor; with no rated samples there is no
+    percentage to report.
     """
-    total = 0
-    poor = 0
-    for quality in qualities:
-        if quality is None:
-            continue
-        total += 1
-        if quality < QUALITY_POOR:
-            poor += 1
-    if total == 0:
+    values = list(qualities)
+    if not any(quality is not None for quality in values):
         return None
+    total = len(values)
+    poor = sum(quality is not None and quality < QUALITY_POOR for quality in values)
     return int(round((total - poor) / total * 100))
 
 

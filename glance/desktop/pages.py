@@ -32,12 +32,14 @@ from ..core import IdentityStore
 
 from . import backend
 from .models_setup import ModelsDialog
+from .setup_guide import SetupGuide
 from .navigation import navigation_icon
 from .enrollment import EnrollmentSession, TARGET
 from .capture_widgets import IdentityCaptureCard, ScanAnimation
 from .theme import ACCENT, DANGER, MUTED, WARN, Card, Dot, Preview
 from .settings_widgets import (
     CheckBox,
+    CompactModePicker,
     HoldToConfirmButton,
     NumberField,
     SegmentedTiles,
@@ -159,11 +161,11 @@ class Dashboard(QWidget):
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(16)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(12)
 
         header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 118, 0)
+        header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(
             _page_header("General", "Face unlock for this Windows account.", 0), 1
         )
@@ -238,7 +240,8 @@ class Dashboard(QWidget):
             "No keyboard or mouse input. Requires background protection running.", self.idle_lock))
         preferences.add_row(SettingsRow("Lock after",
             "After an idle lock, press a key or move the mouse to start face unlock.", self.idle_minutes))
-        self.window_autostart = CheckBox("Open Glance window at sign-in")
+        self.window_autostart = CheckBox()
+        self.window_autostart.setAccessibleName("Open Glance window at sign-in")
         self.window_autostart.setChecked(backend.window_autostart_enabled())
         self.window_autostart.toggled.connect(self._set_window_autostart)
         preferences.add_row(SettingsRow(
@@ -253,23 +256,6 @@ class Dashboard(QWidget):
         layout.addWidget(self.idle_status)
         layout.addWidget(_muted("Your Windows PIN and password are still available."))
 
-        # camera
-        camera_card = Card()
-        camera_layout = QVBoxLayout(camera_card)
-        camera_layout.setContentsMargins(18, 16, 18, 16)
-        camera_layout.setSpacing(10)
-        camera_header = QHBoxLayout()
-        camera_header.addWidget(_title("Camera", "h2"))
-        camera_header.addStretch(1)
-        self.camera_toggle = CheckBox("Live preview")
-        self.camera_toggle.setChecked(False)
-        self.camera_toggle.toggled.connect(self._toggle_camera)
-        camera_header.addWidget(self.camera_toggle)
-        camera_layout.addLayout(camera_header)
-        self.preview = Preview()
-        self.preview.setMinimumHeight(260)
-        camera_layout.addWidget(self.preview)
-        camera_card.setParent(self)
         layout.addStretch(1)
 
         outer = QVBoxLayout(self)
@@ -310,25 +296,10 @@ class Dashboard(QWidget):
         self._refresh_session_pill()
         self.refresh()
         self._timer.start()
-        if self.camera_toggle.isChecked():
-            self.window.acquire_camera("dashboard")
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self._timer.stop()
-        self.window.release_camera("dashboard")
-
-    def _toggle_camera(self, enabled: bool) -> None:
-        if enabled:
-            self.window.acquire_camera("dashboard")
-        else:
-            self.window.release_camera("dashboard")
-            self.preview.clear()
-
-    def on_preview(self, image, info) -> None:
-        if not self.isVisible():
-            return
-        self.preview.set_frame(image, info.faces, info.label, info.hint)
 
     # -- state ------------------------------------------------------------
     def refresh(self) -> None:
@@ -380,12 +351,22 @@ class Dashboard(QWidget):
             self.status_detail.setText("Open Password to verify your Windows password and enable face unlock.")
             self.pause_button.setText("Set up Windows unlock")
             self.pause_button.setEnabled(True)
+        elif running and (settings.any_identity or not settings.identity or not any(
+            person.get("name") == settings.identity and person.get("enabled", True)
+            for person in snapshot["identities"]
+        )):
+            self.status_dot.set_color(WARN)
+            self.status_title.setText("Select one person to unlock")
+            self.status_detail.setText(
+                "Choose one enrolled, enabled person in Recognition. Windows unlock "
+                "fails closed until a valid selection is saved."
+            )
+            self.pause_button.setText("Choose person")
+            self.pause_button.setEnabled(True)
         elif running:
             self.status_dot.set_color(ACCENT)
             self.status_title.setText("Protection on")
-            who = "any enrolled face" if settings.any_identity else (
-                settings.identity or "no identity selected"
-            )
+            who = settings.identity
             self.status_detail.setText(
                 f"Waiting for a lock · {who} · threshold {settings.threshold:.2f}"
             )
@@ -424,11 +405,10 @@ class Dashboard(QWidget):
         if not identities:
             self.identity_card[1].setText("None")
             self.identity_card[2].setText("Enrol a face to begin")
-        elif settings.any_identity:
-            self.identity_card[1].setText("Anyone enrolled")
+        elif settings.any_identity or not chosen:
+            self.identity_card[1].setText("Select one person")
             self.identity_card[2].setText(
-                f"Any of {len(identities)} enrolled face"
-                f"{'' if len(identities) == 1 else 's'} may unlock"
+                "Choose one enrolled person in Recognition before enabling unlock"
             )
         else:
             self.identity_card[1].setText(chosen)
@@ -450,6 +430,9 @@ class Dashboard(QWidget):
     def toggle_pause(self) -> None:
         if not self._agent_installed:
             self.window._navigate(2)
+            return
+        if self.window.settings.any_identity or not self.window.settings.identity:
+            self.window._navigate(4)
             return
         if self._pause_task is not None:
             return
@@ -518,16 +501,18 @@ class EnrollPage(QWidget):
         self._auto_active = False
         self._discard_pending = False
         self._session_name = ""
-        self._recapture_target = ""
+        self._recapture_target: str | None = None
+        self._recapture_name = ""
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(850)
         self._capture_timer.timeout.connect(self._capture)
         self._camera_ready = False
         self._capture_pending = False
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(18)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(12)
         layout.addWidget(_page_header(
             "Your Face",
             "Automatically capture 18 clear samples. Keep your full face visible "
@@ -535,13 +520,13 @@ class EnrollPage(QWidget):
             1,
         ))
 
-        body = QHBoxLayout()
-        body.setSpacing(20)
+        body = QVBoxLayout()
+        body.setSpacing(12)
 
         left = QVBoxLayout()
         left.setSpacing(12)
         self.preview = Preview()
-        self.preview.setMinimumWidth(280)
+        self.preview.setMinimumWidth(0)
         left.addWidget(self.preview, 1)
 
         camera_row = QHBoxLayout()
@@ -563,7 +548,7 @@ class EnrollPage(QWidget):
         row.addWidget(self.counter)
         row.addStretch(1)
         left.addLayout(row)
-        body.addLayout(left, 3)
+        body.addLayout(left, 1)
 
         right = QVBoxLayout()
         right.setSpacing(12)
@@ -629,8 +614,11 @@ class EnrollPage(QWidget):
         people_layout.addStretch(1)
         right.addWidget(people, 1)
 
-        body.addLayout(right, 2)
+        body.addLayout(right, 1)
         layout.addLayout(body, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(_scrollable(inner))
 
     # -- lifecycle --------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: N802
@@ -695,8 +683,8 @@ class EnrollPage(QWidget):
             )
             self.window._navigate(2)
             return
-        if self._recapture_target:
-            name = self._recapture_target
+        if self._recapture_target is not None:
+            name = self._recapture_name
         else:
             name = self.name_edit.text().strip()
             if not name:
@@ -771,7 +759,8 @@ class EnrollPage(QWidget):
         self._session = EnrollmentSession()
         self._samples = self._session.samples
         self._session_name = ""
-        self._recapture_target = ""
+        self._recapture_target = None
+        self._recapture_name = ""
         self.name_edit.setEnabled(True)
         self.name_edit.clear()
         self.capture_card.set_samples([])
@@ -786,7 +775,7 @@ class EnrollPage(QWidget):
         self._clear()
 
     def _save(self) -> None:
-        name = self._recapture_target or self._session_name
+        name = self._recapture_name if self._recapture_target is not None else self._session_name
         if not name:
             QMessageBox.information(self, "Glance", "Give this face a name first.")
             return
@@ -798,10 +787,10 @@ class EnrollPage(QWidget):
         qualities = [quality for _, quality in self._samples]
         try:
             store = IdentityStore(backend.IDENTITIES_PATH)
-            if self._recapture_target:
+            if self._recapture_target is not None:
                 # Recapture replaces the identity's samples wholesale; it is a
                 # redo, never an append.
-                store.replace_samples(name, embeddings, qualities)
+                store.replace_samples(self._recapture_target, embeddings, qualities)
             else:
                 for embedding, quality in zip(embeddings, qualities):
                     store.add_sample(name, embedding, quality)
@@ -813,11 +802,12 @@ class EnrollPage(QWidget):
             return
 
         count = len(self._samples)
-        recaptured = self._recapture_target
+        recaptured = self._recapture_name if self._recapture_target is not None else ""
         self._session = EnrollmentSession()
         self._samples = self._session.samples
         self._session_name = ""
-        self._recapture_target = ""
+        self._recapture_target = None
+        self._recapture_name = ""
         self.counter.setText("18 / 18 · saved")
         self.name_edit.setEnabled(True)
         self.name_edit.clear()
@@ -875,7 +865,8 @@ class EnrollPage(QWidget):
             buttons.setSpacing(6)
             recapture = QPushButton("Recapture")
             recapture.clicked.connect(
-                lambda _=False, n=person["name"]: self._begin_recapture(n)
+                lambda _=False, identity_id=person["id"], n=person["name"]:
+                    self._begin_recapture(identity_id, n)
             )
             buttons.addWidget(recapture)
             remove = QPushButton("Remove")
@@ -896,7 +887,7 @@ class EnrollPage(QWidget):
         self.window.camera.reload_store()
         self.refresh_people()
 
-    def _begin_recapture(self, name: str) -> None:
+    def _begin_recapture(self, identity_id: str, name: str) -> None:
         confirm = QMessageBox.question(
             self, "Glance",
             f"Recapture {name}? Their current samples will be replaced, not added to.",
@@ -907,7 +898,8 @@ class EnrollPage(QWidget):
         self._session = EnrollmentSession()
         self._samples = self._session.samples
         self._session_name = name
-        self._recapture_target = name
+        self._recapture_target = identity_id
+        self._recapture_name = name
         self.name_edit.setEnabled(False)
         self.name_edit.setText(name)
         self.capture_card.name.setText(name)
@@ -951,40 +943,30 @@ class SettingsPage(QWidget):
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(16)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(12)
 
         layout.addWidget(_page_header(
             "Recognition",
-            "Decide who may unlock Windows and how confidently Glance must recognize them.",
+            "Choose one person who may unlock Windows and set recognition confidence.",
             4,
         ))
 
         card = Card()
         form = QVBoxLayout(card)
-        form.setContentsMargins(18, 14, 18, 16)
-        form.setSpacing(10)
+        form.setContentsMargins(14, 12, 14, 14)
+        form.setSpacing(8)
 
         form.addWidget(_title("Who may unlock", "h2"))
         self.identity = Select()
         self.identity.currentIndexChanged.connect(self._selection_changed)
         form.addWidget(self.identity)
         self.scope_note = _muted(
-            "Anyone enrolled can unlock Windows, pass the in-app face check, "
-            "change the saved password, and enroll new faces."
+            "Select one enrolled person. Only that person can unlock Windows."
         )
         form.addWidget(self.scope_note)
 
         form.addWidget(_title("Match confidence", "h2"))
-        self.match_stops = SegmentedTiles((
-            ("less_strict", "Less strict", "0.58 · easier matches"),
-            ("default", "Default", "0.63 · recommended"),
-            ("more_strict", "More strict", "0.68 · fewer false accepts"),
-        ))
-        self.match_stops.valueChanged.connect(self._match_stop_chosen)
-        form.addWidget(self.match_stops)
-
-        form.addWidget(_title("Match threshold (fine)", "h2"))
         threshold_row = QHBoxLayout()
         self.threshold = QSlider(Qt.Horizontal)
         self.threshold.setRange(45, 85)
@@ -995,16 +977,31 @@ class SettingsPage(QWidget):
         self.threshold_value.setFixedWidth(48)
         threshold_row.addWidget(self.threshold_value)
         form.addLayout(threshold_row)
+        confidence_labels = QHBoxLayout()
+        confidence_labels.addWidget(_muted("Less strict"), 1)
+        default_confidence = _muted("Default")
+        default_confidence.setAlignment(Qt.AlignCenter)
+        confidence_labels.addWidget(default_confidence, 1)
+        strict_confidence = _muted("More strict")
+        strict_confidence.setAlignment(Qt.AlignRight)
+        confidence_labels.addWidget(strict_confidence, 1)
+        form.addLayout(confidence_labels)
         self.threshold_note = _muted("")
         form.addWidget(self.threshold_note)
 
         form.addWidget(_title("Detection distance", "h2"))
-        self.detection_distance = SegmentedTiles((
-            ("close", "Close", "face must be closer / larger"),
-            ("default", "Default", "current behaviour"),
-            ("far", "Far", "recognizes from farther away"),
-        ))
+        self.detection_distance = QSlider(Qt.Horizontal)
+        self.detection_distance.setRange(0, 100)
         form.addWidget(self.detection_distance)
+        distance_labels = QHBoxLayout()
+        distance_labels.addWidget(_muted("Close"), 1)
+        default_distance = _muted("Default")
+        default_distance.setAlignment(Qt.AlignCenter)
+        distance_labels.addWidget(default_distance, 1)
+        far_distance = _muted("Far")
+        far_distance.setAlignment(Qt.AlignRight)
+        distance_labels.addWidget(far_distance, 1)
+        form.addLayout(distance_labels)
 
         form.addWidget(_title("Face detection duration", "h2"))
         scan_row = QHBoxLayout()
@@ -1024,15 +1021,15 @@ class SettingsPage(QWidget):
         form.addWidget(_title("Proof of life", "h2"))
         self.liveness_enabled = CheckBox("Enable liveness checks")
         form.addWidget(self.liveness_enabled)
-        self.liveness_mode = SegmentedTiles((
-            ("light", "Light", "deny cues only"),
-            ("heavy", "Heavy", "deny cues + head-turn challenge"),
+        self.liveness_mode = CompactModePicker((
+            ("light", "Light"),
+            ("heavy", "Heavy"),
         ))
         form.addWidget(self.liveness_mode)
         self.liveness_warning = _muted(
             "Off means face recognition alone decides - a photo could pass. On "
             "Windows, unlock grants and the in-app check still enforce the "
-            "head-turn challenge because the sign-in provider cannot be safely "
+            "natural-motion check because the sign-in provider cannot be safely "
             "bypassed; this setting is stored so protection can be relaxed "
             "where it becomes safe."
         )
@@ -1040,10 +1037,10 @@ class SettingsPage(QWidget):
         self.liveness_warning.hide()
         form.addWidget(self.liveness_warning)
         self.liveness_note = _muted(
-            "Face forward, turn your head left, turn right, then face forward again when "
-            "prompted. If it stalls, face the camera directly, move a little closer, and "
-            "use steady front lighting. RGB head-motion checks are not proof of a live "
-            "person and may not detect photo or video replays."
+            "Stay visible and move naturally so the camera can detect small changes in "
+            "your facial landmarks. This is a motion check, not proof of a live person: "
+            "a moving photo or replay video may pass. Keep Windows PIN/password sign-in "
+            "available."
         )
         self.liveness_note.setWordWrap(True)
         form.addWidget(self.liveness_note)
@@ -1099,7 +1096,7 @@ class SettingsPage(QWidget):
     def load(self) -> None:
         settings = self.window.settings
         self.identity.clear()
-        self.identity.addItem("Anyone enrolled", "")
+        self.identity.addItem("Select one enrolled person", None)
         try:
             people = backend.identity_summary()
         except RuntimeError as error:
@@ -1108,17 +1105,19 @@ class SettingsPage(QWidget):
             return
         for person in people:
             self.identity.addItem(person["name"], person["name"])
-        if settings.any_identity:
-            self.identity.setCurrentIndex(0)
-        else:
+        if not settings.any_identity:
             index = self.identity.findData(settings.identity)
             self.identity.setCurrentIndex(index if index > 0 else 0)
+        else:
+            self.identity.setCurrentIndex(0)
         self._selection_changed()
 
         self.threshold.setValue(int(round(settings.threshold * 100)))
         self._threshold_changed(self.threshold.value())
         self.timeout.setValue(int(settings.timeout))
-        self.detection_distance.set_value(settings.detection_distance)
+        self.detection_distance.setValue({"close": 0, "default": 50, "far": 100}.get(
+            settings.detection_distance, 50
+        ))
         self.scan_seconds.setValue(int(settings.face_detection_seconds))
         self.liveness_enabled.setChecked(settings.liveness_enabled)
         self.liveness_mode.set_value(backend._liveness_mode(settings.liveness))
@@ -1133,7 +1132,7 @@ class SettingsPage(QWidget):
         if not hasattr(self, "save"):
             return
         selected = self.identity.currentData()
-        valid = isinstance(selected, str)
+        valid = isinstance(selected, str) and bool(selected.strip())
         self.save.setEnabled(valid and self._settings_task is None)
         if hasattr(self, "scope_note"):
             if selected:
@@ -1143,16 +1142,8 @@ class SettingsPage(QWidget):
                 )
             else:
                 self.scope_note.setText(
-                    "Anyone enrolled can unlock Windows, pass the in-app face check, "
-                    "change the saved password, and enroll new faces."
+                    "Select one enrolled person. Missing or invalid selections cannot unlock Windows."
                 )
-
-    def _match_stop_chosen(self, key: str) -> None:
-        value = backend.MATCH_CONFIDENCE_STOPS.get(key)
-        if value is not None:
-            self.threshold.setValue(int(round(value * 100)))
-        else:
-            self._threshold_changed(self.threshold.value())
 
     def _threshold_changed(self, value: int) -> None:
         score = value / 100
@@ -1164,13 +1155,6 @@ class SettingsPage(QWidget):
         else:
             tone = "Strict - fewer false accepts, more retries in poor light."
         self.threshold_note.setText(tone)
-        if hasattr(self, "match_stops"):
-            match = next(
-                (name for name, stop in backend.MATCH_CONFIDENCE_STOPS.items()
-                 if abs(stop - score) < 0.005),
-                None,
-            )
-            self.match_stops.set_value(match)
 
     def _sync_liveness_warning(self, *_args) -> None:
         if not hasattr(self, "liveness_warning"):
@@ -1190,22 +1174,20 @@ class SettingsPage(QWidget):
 
     def _save(self) -> None:
         selected = self.identity.currentData()
-        if not isinstance(selected, str):
-            self.status.setText("Choose who may unlock.")
+        if not isinstance(selected, str) or not selected.strip():
+            self.status.setText("Select one enrolled person before saving.")
             self.status.setStyleSheet(f"color: {DANGER};")
             return
-        anyone = selected == ""
-
         candidate = backend.Settings(
             threshold=self.threshold.value() / 100,
             timeout=float(self.timeout.value()),
-            identity="" if anyone else selected,
-            any_identity=anyone,
+            identity=selected,
+            any_identity=False,
             camera=self.window.settings.camera,
             idle_lock_enabled=self.window.settings.idle_lock_enabled,
             idle_lock_minutes=self.window.settings.idle_lock_minutes,
             liveness=backend._liveness_mode(self.liveness_mode.value()),
-            detection_distance=self.detection_distance.value() or backend.DETECTION_DISTANCE_DEFAULT,
+            detection_distance=backend.distance_from_slider(self.detection_distance.value()),
             face_detection_seconds=int(self.scan_seconds.value()),
             liveness_enabled=self.liveness_enabled.isChecked(),
             animation_enabled=self.animation_enabled.isChecked(),
@@ -1214,6 +1196,8 @@ class SettingsPage(QWidget):
             camera_builtin=self.window.settings.camera_builtin,
             camera_external=self.window.settings.camera_external,
             display_choice=self.window.settings.display_choice,
+            session_lifetime_days=self.window.settings.session_lifetime_days,
+            window_autostart=self.window.settings.window_autostart,
         )
         was_running = backend.agent_running()
 
@@ -1318,9 +1302,10 @@ class PasswordPage(QWidget):
     def __init__(self, window):
         super().__init__()
         self.window = window
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(14)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(22, 16, 22, 16)
+        layout.setSpacing(12)
         layout.addWidget(_page_header(
             "Password",
             "Connect Glance to your existing Windows account.",
@@ -1346,11 +1331,11 @@ class PasswordPage(QWidget):
         layout.addWidget(self.group)
         layout.addWidget(self.credential)
         layout.addWidget(_title("Auto lock session", "h2"))
-        self.session_lifetime = SegmentedTiles((
-            ("7", "7 days", "session re-locks after a week"),
-            ("14", "14 days", "session re-locks after two weeks"),
-            ("30", "30 days", "session re-locks after a month"),
-            ("0", "Never", "stays unlocked until you lock it"),
+        self.session_lifetime = CompactModePicker((
+            ("7", "7 days"),
+            ("14", "14 days"),
+            ("30", "30 days"),
+            ("0", "Never"),
         ))
         self.session_lifetime.valueChanged.connect(self._save_session_lifetime)
         layout.addWidget(self.session_lifetime)
@@ -1367,20 +1352,22 @@ class PasswordPage(QWidget):
         ))
         self.unlock_status = _muted("Face unlock setup has not been checked.")
         layout.addWidget(self.unlock_status)
-        controls = QHBoxLayout()
+        controls = QGridLayout()
         self.enable_unlock = QPushButton("Enable Windows unlock")
         self.enable_unlock.setObjectName("primary")
         self.enable_unlock.clicked.connect(self._enable_unlock)
-        controls.addWidget(self.enable_unlock)
+        controls.addWidget(self.enable_unlock, 0, 0)
         self.disable_unlock = QPushButton("Disable")
         self.disable_unlock.clicked.connect(self._disable_unlock)
-        controls.addWidget(self.disable_unlock)
+        controls.addWidget(self.disable_unlock, 0, 1)
         self.reset_unlock = QPushButton("Reset Glance…")
         self.reset_unlock.clicked.connect(self._reset_unlock)
-        controls.addWidget(self.reset_unlock)
-        controls.addStretch(1)
+        controls.addWidget(self.reset_unlock, 1, 0, 1, 2)
         layout.addLayout(controls)
         layout.addStretch(1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(_scrollable(inner))
         self._credential_task: Task | None = None
         self._unlock_task: Task | None = None
         self._account = backend.ACCOUNT_HINT
@@ -1631,6 +1618,9 @@ class AboutPage(QWidget):
             "Version, models, and diagnostics for this install.",
             5,
         ))
+        self.setup_guide_button = QPushButton("Open complete setup guide")
+        self.setup_guide_button.clicked.connect(self._show_setup_guide)
+        content.addWidget(self.setup_guide_button)
         info = SettingsGroup()
         info.add_row(SettingsRow(
             "Glance",
@@ -1703,9 +1693,11 @@ class AboutPage(QWidget):
         self.logs.layout().itemAt(0).layout().insertWidget(0, self.back_logs)
         self.pages = QStackedWidget()
         self.content_scroll = _scrollable(self.content)
+        self.setup_guide = None
         self.pages.addWidget(self.content_scroll)
         self.pages.addWidget(self.logs)
         layout.addWidget(self.pages)
+        self._guide_navigate = getattr(window, "_navigate", lambda _index: None)
 
     def _refresh_models(self) -> None:
         if backend.models_ready():
@@ -1735,6 +1727,20 @@ class AboutPage(QWidget):
     def _show_logs(self) -> None:
         self.logs.refresh()
         self.pages.setCurrentWidget(self.logs)
+
+    def _show_setup_guide(self) -> None:
+        if self.setup_guide is None:
+            self.setup_guide = SetupGuide(
+                navigate=self._guide_navigate,
+                open_models=self._manage_models,
+                open_camera_privacy=lambda: QDesktopServices.openUrl(
+                    QUrl("ms-settings:privacy-webcam")
+                ),
+                return_to_about=lambda: self.pages.setCurrentWidget(self.content_scroll),
+                open_logs=self._show_logs,
+            )
+            self.pages.insertWidget(1, self.setup_guide)
+        self.pages.setCurrentWidget(self.setup_guide)
 
     def _identify_account(self) -> None:
         if self._account_task is not None:

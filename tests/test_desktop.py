@@ -15,16 +15,15 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QPushButton, QWidget
 
 import glance.agent.glance_agent as glance_agent
 import glance.desktop.backend as backend
 import glance.desktop.face_gate as face_gate
 import glance.desktop.main as desktop_main
 import glance.desktop.theme as theme
-from glance.desktop.onboarding import FirstRunDialog
 from glance.desktop.models_setup import ModelsDialog
 from glance.desktop.settings_widgets import FloatingTabBar, SettingsGroup, SettingsRow
 from glance.desktop.backend import Settings
@@ -87,6 +86,19 @@ class CameraLifecycleTests(unittest.TestCase):
         finally:
             worker.stop()
             self.assertTrue(worker.wait(1000), "restarted worker did not stop")
+
+    def test_preview_mirrors_only_the_displayed_frame_and_face_box(self) -> None:
+        from types import SimpleNamespace
+
+        frame = np.zeros((2, 4, 3), dtype=np.uint8)
+        frame[0, 0] = (0, 0, 255)
+        face = SimpleNamespace(bbox=(0, 0, 1, 1), area=1)
+        image, info = CameraWorker._preview(frame, [face], "", 0.0)
+
+        self.assertEqual(image.pixelColor(3, 0).red(), 255)
+        self.assertEqual(image.pixelColor(0, 0).red(), 0)
+        self.assertEqual(info.faces, [(3.0, 0.0, 4.0, 1.0)])
+        self.assertEqual(int(frame[0, 0, 2]), 255, "recognition source frame must stay unmodified")
 
 
     def test_capture_request_is_single_flight_and_requires_ready_worker(self) -> None:
@@ -220,6 +232,29 @@ class AdaptiveThemeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
+    def test_compact_pages_fit_without_horizontal_scrolling(self) -> None:
+        window = MainWindow()
+        window.setStyleSheet(theme.resolve_theme("dark").stylesheet)
+        window.show()
+        try:
+            self.app.processEvents()
+            for index in (0, 1, 2):
+                window.stack.setCurrentIndex(index)
+                self.app.processEvents()
+                page = window.pages[index]
+                area = page.findChild(__import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea)
+                self.assertIsNotNone(area, f"page {index} should scroll vertically in the compact shell")
+                self.assertEqual(
+                    area.horizontalScrollBar().maximum(), 0,
+                    f"page {index} overflows horizontally at {area.viewport().width()} px",
+                )
+                self.assertLessEqual(
+                    area.widget().width(), area.viewport().width(),
+                    f"page {index} content is clipped horizontally",
+                )
+        finally:
+            window.close()
+
     def test_settings_row_accepts_a_subtitle_set_after_construction(self) -> None:
         row = SettingsRow("InsightFace buffalo_s", "")
         row.subtitle.setText("Installed and checksum-verified.")
@@ -246,6 +281,92 @@ class AdaptiveThemeTests(unittest.TestCase):
                                      page.account_status.heightForWidth(page.account_status.width())))
         finally:
             page.close()
+
+    def test_about_contains_complete_setup_guide_and_routes_actions(self) -> None:
+        from glance.desktop.pages import AboutPage
+
+        navigated = []
+        page = AboutPage(SimpleNamespace(_navigate=navigated.append))
+        self.assertTrue(hasattr(page, "setup_guide_button"))
+        self.assertIsNone(page.setup_guide)
+        page.setup_guide_button.click()
+        self.assertIs(page.pages.currentWidget(), page.setup_guide)
+        self.assertTrue(page.setup_guide.widgetResizable())
+        self.assertEqual(page.setup_guide.section_titles, [
+            "Before you begin", "Install face models", "Set up your Windows password",
+            "Enroll your face", "Choose who may unlock", "Enable protection",
+            "Privacy, security, and troubleshooting",
+        ])
+        page.setup_guide.action_buttons["Password"].click()
+        self.assertEqual(navigated, [2])
+        page.setup_guide.back_button.click()
+        self.assertIs(page.pages.currentWidget(), page.content_scroll)
+        page.close()
+
+    def test_recapture_button_targets_stored_identity_id(self) -> None:
+        window = MainWindow()
+        page = window.enroll
+        identity_id = "f42b0508-1dba-494a-9d7d-88796be4930e"
+        with (
+            patch("glance.desktop.pages.backend.identity_summary", return_value=[{
+                "id": identity_id, "name": "Anu", "qualities": [None], "enabled": True,
+            }]),
+            patch("glance.desktop.pages.QMessageBox.question", return_value=QMessageBox.Yes),
+        ):
+            page.refresh_people()
+            button = next(
+                child for child in page.findChildren(QPushButton)
+                if child.text() == "Recapture"
+            )
+            button.click()
+        self.assertEqual(page._recapture_target, identity_id)
+        self.assertEqual(page._recapture_name, "Anu")
+        window.close()
+
+    def test_reduced_motion_skips_page_transition(self) -> None:
+        from glance.desktop.motion import motion_enabled
+
+        def unavailable():
+            raise OSError("accessibility setting unavailable")
+
+        self.assertFalse(motion_enabled(lambda: False))
+        self.assertTrue(motion_enabled(lambda: True))
+        self.assertFalse(motion_enabled(unavailable))
+        with patch("glance.desktop.main.motion_enabled", return_value=False):
+            window = MainWindow()
+        window._navigate(5)
+        self.assertEqual(window.stack.currentIndex(), 5)
+        self.assertIsNone(window._page_animation)
+        window.close()
+
+    def test_page_transition_is_single_shot_and_skips_camera(self) -> None:
+        with patch("glance.desktop.main.motion_enabled", return_value=True):
+            window = MainWindow()
+        window._navigate(5)
+        animation = window._page_animation
+        self.assertIsNotNone(animation)
+        self.assertEqual(animation.duration(), 160)
+        window._navigate(3)
+        self.assertEqual(window.stack.currentIndex(), 3)
+        self.assertIsNone(window._page_animation)
+        window.close()
+
+    def test_startup_splash_uses_app_icon_and_cleans_up(self) -> None:
+        from glance.desktop.splash import StartupSplash
+
+        splash = StartupSplash()
+        self.assertFalse(splash.pixmap().isNull())
+        self.assertGreater(splash.MAX_VISIBLE_MS, 0)
+        splash.show()
+        self.app.processEvents()
+        self.assertTrue(splash._timeout.isActive())
+        window = QWidget()
+        window.show()
+        splash.finish(window)
+        self.assertFalse(splash._timeout.isActive())
+        self.assertTrue(splash._finished)
+        self.assertFalse(splash.isVisible())
+        window.close()
 
     def test_light_and_dark_themes_have_distinct_surfaces(self) -> None:
         self.assertTrue(hasattr(theme, "resolve_theme"), "theme resolver is not implemented")
@@ -278,15 +399,19 @@ class AdaptiveThemeTests(unittest.TestCase):
         group.add_row(SettingsRow("Face", "Enrolled identities"))
         self.assertEqual(group.column.count(), 1)
 
-    def test_main_window_has_six_sidebar_pages_and_preserves_window_size(self) -> None:
+    def test_main_window_has_compact_floating_navigation_and_preserves_window_size(self) -> None:
         window = MainWindow()
         self.assertEqual(
             [button.text() for button in window.nav.buttons],
             ["General", "Your Face", "Password", "Camera", "Recognition", "About"],
         )
         self.assertEqual(window.stack.count(), 6)
+        self.assertEqual(window.nav.objectName(), "floatingNavigation")
+        self.assertLessEqual(window.width(), 720)
+        self.assertLessEqual(window.height(), 900)
         self.assertFalse(window.camera.isRunning())
-        self.assertFalse(window.dashboard.camera_toggle.isChecked())
+        self.assertFalse(hasattr(window.dashboard, "camera_toggle"))
+        self.assertFalse(hasattr(window.dashboard, "preview"))
         self.assertFalse(window.camera_page.preview_toggle.isChecked())
         original_size = window.size()
         window.nav.buttons[4].click()
@@ -296,47 +421,42 @@ class AdaptiveThemeTests(unittest.TestCase):
         self.assertFalse(window.nav.buttons[0].isChecked())
         window.close()
 
-    def test_sidebar_groups_and_window_controls_match_the_glass_shell(self) -> None:
+    def test_compact_navigation_uses_windows_caption_controls_not_traffic_lights(self) -> None:
         window = MainWindow()
         sections = [
             label.text()
             for label in window.nav.findChildren(QLabel)
             if label.objectName() == "navSection"
         ]
-        self.assertEqual(sections, ["Authentication", "Glance"])
+        self.assertEqual(sections, [])
         self.assertEqual(window.nav.count(), 6)
         self.assertTrue(hasattr(window, "window_controls"))
+        self.assertEqual(
+            [button.kind for button in (
+                window.window_controls.minimise,
+                window.window_controls.zoom,
+                window.window_controls.close_button,
+            )],
+            ["min", "max", "close"],
+        )
         self.assertTrue(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
         window.close()
 
-    def test_matching_profile_tiles_drive_the_threshold(self) -> None:
+    def test_recognition_controls_use_compact_confidence_and_distance_sliders(self) -> None:
         window = MainWindow()
         page = window.settings_page
-        page.match_stops.tiles["more_strict"].click()
-        self.assertEqual(page.threshold.value(), 68)
-        self.assertTrue(page.match_stops.tiles["more_strict"].isChecked())
+        self.assertFalse(hasattr(page, "match_stops"))
+        self.assertEqual(page.liveness_mode.objectName(), "compactModePicker")
+        page.threshold.setValue(60)
+        self.assertEqual(page.threshold.value(), 60)
+        self.assertEqual(page.threshold_value.text(), "0.60")
         page.threshold.setValue(63)
-        self.assertEqual(page.match_stops.value(), "default")
         self.assertEqual(page.threshold_value.text(), "0.63")
-        page.threshold.setValue(66)
-        self.assertIsNone(page.match_stops.value())
+        self.assertEqual(desktop_main.backend.Settings().detection_distance, "default")
+        self.assertEqual(backend.distance_from_slider(0), "close")
+        self.assertEqual(backend.distance_from_slider(50), "default")
+        self.assertEqual(backend.distance_from_slider(100), "far")
         window.close()
-
-    def test_compact_onboarding_module_is_available(self) -> None:
-        self.assertIsNotNone(importlib.util.find_spec("glance.desktop.onboarding"))
-
-    def test_onboarding_persists_completion_only_after_finish(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            settings = QSettings(str(Path(temp) / "settings.ini"), QSettings.IniFormat)
-            settings.clear()
-            window = MainWindow()
-            dialog = FirstRunDialog(window, settings)
-            self.assertEqual(dialog.stack.count(), 5)
-            self.assertFalse(FirstRunDialog.is_completed(settings))
-            for _ in range(dialog.stack.count()):
-                dialog._next()
-            self.assertTrue(FirstRunDialog.is_completed(settings))
-            window.close()
 
     @patch.object(desktop_main.backend, "identity_summary", return_value=[])
     def test_dashboard_routes_uninstalled_agent_to_in_app_setup(self, _identities) -> None:
@@ -530,22 +650,26 @@ class AgentIdentityTests(unittest.TestCase):
                         self.assertNotEqual(result, "granted")
                         writer.assert_not_called()
 
-    def test_anyone_mode_grants_for_any_enrolled_face(self) -> None:
+    def test_anyone_mode_is_rejected_without_opening_camera(self) -> None:
         result, writer = self._grant_result("Anu", identity=None, any_identity=True)
-        self.assertEqual(result, "granted")
-        writer.assert_called_once()
-
-    def test_anyone_mode_fails_closed_with_no_enrolled_faces(self) -> None:
-        result, writer = self._grant_result("Sampath", identity=None,
-                                            any_identity=True, identities=())
-        self.assertEqual(result, "error: no enrolled identities")
+        self.assertEqual(result, "error: one enrolled identity must be selected")
         writer.assert_not_called()
 
-    def test_anyone_config_sets_a_wildcard_verifier(self) -> None:
+    def test_anyone_mode_is_rejected_before_checking_enrollment(self) -> None:
+        result, writer = self._grant_result("Sampath", identity=None,
+                                            any_identity=True, identities=())
+        self.assertEqual(result, "error: one enrolled identity must be selected")
+        writer.assert_not_called()
+
+    def test_legacy_anyone_config_is_blocked_before_verification(self) -> None:
         content = json.dumps({"any_identity": True, "identity": ""}).encode("utf-8")
         verifier = self._main_verifier(content, "Sampath")
         self.assertTrue(verifier.any_identity)
         self.assertIsNone(verifier.identity)
+        self.assertEqual(
+            verifier.run(threading.Event()),
+            "error: one enrolled identity must be selected",
+        )
 
     def test_specific_config_keeps_one_identity(self) -> None:
         content = json.dumps({"any_identity": False, "identity": "Anu"}).encode("utf-8")
@@ -593,29 +717,27 @@ class SettingsIdentityTests(unittest.TestCase):
             page.load()
         return page
 
-    def test_proof_of_life_prompt_describes_head_turn_challenge(self) -> None:
+    def test_proof_of_life_prompt_describes_motion_and_replay_limits(self) -> None:
         page = self.make_page("Sampath")
         note = page.liveness_note.text().lower()
-        self.assertIn("head left", note)
-        self.assertIn("turn right", note)
-        self.assertIn("face forward", note)
+        self.assertIn("move naturally", note)
+        self.assertIn("motion check", note)
         self.assertIn("replay", note)
-        self.assertNotIn("smile", note)
+        self.assertNotIn("head-turn challenge", note)
 
-    def test_anyone_enrolled_is_the_default_scope(self) -> None:
+    def test_anyone_legacy_scope_requires_an_explicit_person(self) -> None:
         page = self.make_page("", any_identity=True)
-        self.assertEqual(page.identity.currentData(), "")
-        self.assertEqual(page.identity.currentText(), "Anyone enrolled")
-        self.assertTrue(page.save.isEnabled())
-        self.assertIn("Anyone enrolled", page.scope_note.text())
+        self.assertIsNone(page.identity.currentData())
+        self.assertFalse(page.save.isEnabled())
+        self.assertIn("Select one enrolled person", page.scope_note.text())
 
     def test_one_person_scope_is_preserved(self) -> None:
         page = self.make_page("Sampath")
         self.assertEqual(page.identity.currentData(), "Sampath")
         self.assertIn("Only Sampath", page.scope_note.text())
 
-    def test_saving_anyone_scope_persists_an_empty_identity(self) -> None:
-        page = self.make_page("Sampath", any_identity=True)
+    def test_saving_without_a_person_is_rejected(self) -> None:
+        page = self.make_page("", any_identity=True)
         seen = {}
 
         def apply(candidate, _running):
@@ -636,8 +758,8 @@ class SettingsIdentityTests(unittest.TestCase):
             patch("glance.desktop.pages.backend.apply_settings", side_effect=apply),
         ):
             page._save()
-        self.assertTrue(seen["candidate"].any_identity)
-        self.assertEqual(seen["candidate"].identity, "")
+        self.assertNotIn("candidate", seen)
+        self.assertIn("Select one", page.status.text())
 
     def test_saving_a_person_scope_persists_that_identity(self) -> None:
         page = self.make_page("Sampath", any_identity=False)
@@ -663,6 +785,41 @@ class SettingsIdentityTests(unittest.TestCase):
             page._save()
         self.assertFalse(seen["candidate"].any_identity)
         self.assertEqual(seen["candidate"].identity, "Sampath")
+
+    def test_saving_recognition_settings_preserves_session_lifetime(self) -> None:
+        settings = Settings(
+            identity="Sampath", session_lifetime_days=7, window_autostart=True,
+        )
+        window = SimpleNamespace(settings=settings)
+        page = SettingsPage(window)
+        with (
+            patch("glance.desktop.pages.backend.identity_summary", return_value=[
+                {"name": "Sampath", "samples": 9},
+            ]),
+            patch("glance.desktop.pages.backend.task_state", return_value={"enabled": True}),
+        ):
+            page.load()
+        seen = {}
+
+        class FakeTask:
+            def __init__(self, function, _parent=None):
+                self.function = function
+                self.done = SimpleNamespace(connect=lambda _callback: None)
+
+            def start(self):
+                self.function()
+
+        with (
+            patch("glance.desktop.pages.Task", FakeTask),
+            patch("glance.desktop.pages.backend.agent_running", return_value=False),
+            patch("glance.desktop.pages.backend.apply_settings",
+                  side_effect=lambda candidate, _running: seen.setdefault("candidate", candidate)
+                  or (True, "Settings saved.")),
+        ):
+            page._save()
+
+        self.assertEqual(seen["candidate"].session_lifetime_days, 7)
+        self.assertTrue(seen["candidate"].window_autostart)
 
     def test_owner_change_stops_agent_before_saving_then_restarts(self) -> None:
         events = []
@@ -879,15 +1036,13 @@ class FaceGateTests(unittest.TestCase):
         self.assertFalse(camera.gate_enabled)
         self.assertEqual(events, ["acquire", "release"])
 
-    def test_scan_displays_head_turn_phase_and_cue_specific_guidance(self) -> None:
+    def test_scan_displays_natural_motion_guidance_and_deny_reason(self) -> None:
         camera = self.FakeCamera()
         dialog, _events, _parent = self.make_dialog(camera)
         self.show_dialog(dialog)
-        self.assertIn("face forward", dialog.status.text().lower())
-        camera.gate.emit("", 0.0, "Turn left")
-        self.assertEqual(dialog.hint.text(), "Turn left")
-        camera.gate.emit("", 0.0, "Turn right")
-        self.assertEqual(dialog.hint.text(), "Turn right")
+        self.assertIn("move naturally", dialog.status.text().lower())
+        camera.gate.emit("", 0.0, "Stay in view and move naturally")
+        self.assertIn("move naturally", dialog.hint.text().lower())
         camera.gate.emit("", 0.0,
                          "A rectangular edge near the face confused the camera check. Reposition and retry.")
         self.assertIn("reposition", dialog.hint.text().lower())
@@ -1137,7 +1292,7 @@ class StartupModelsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
-    def test_startup_offers_models_before_onboarding(self) -> None:
+    def test_startup_keeps_model_flow_without_first_run_walkthrough(self) -> None:
         window = MainWindow()
         order: list[str] = []
 
@@ -1146,15 +1301,36 @@ class StartupModelsTests(unittest.TestCase):
             return True
 
         with patch.object(ModelsDialog, "ensure_models", side_effect=offer_models), \
-                patch.object(MainWindow, "show_first_run_if_needed",
-                             side_effect=lambda: order.append("onboarding")), \
                 patch.object(MainWindow, "show_whats_new_if_needed",
                              side_effect=lambda: order.append("whats-new")), \
                 patch.object(MainWindow, "offer_startup_if_needed",
                              side_effect=lambda: order.append("startup")):
             window.startup_sequence()
 
-        self.assertEqual(order, ["models", "onboarding", "whats-new", "startup"])
+        self.assertEqual(order, ["models", "whats-new", "startup"])
+
+    def test_splash_closes_when_main_window_initialization_fails(self) -> None:
+        class FakeSplash:
+            def __init__(self):
+                self.closed = False
+
+            def show(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+            def finish(self, _window):
+                raise AssertionError("failed initialization must not finish splash")
+
+        splash = FakeSplash()
+        with (
+            patch.object(desktop_main, "StartupSplash", return_value=splash),
+            patch.object(desktop_main, "MainWindow", side_effect=RuntimeError("startup failed")),
+            self.assertRaisesRegex(RuntimeError, "startup failed"),
+        ):
+            desktop_main.create_and_show_main_window(self.app)
+        self.assertTrue(splash.closed)
 
     def test_whats_new_is_marked_after_being_shown(self) -> None:
         window = MainWindow()
@@ -1363,9 +1539,9 @@ class EnrollmentUiTests(unittest.TestCase):
         window = MainWindow()
         worker = FakeWorker()
         window.camera = worker
-        window._owners.add("dashboard")
+        window._owners.add("camera-preview")
 
-        window.release_camera("dashboard")
+        window.release_camera("camera-preview")
         window.acquire_camera("enroll")
         QTest.qWait(350)
         self.assertEqual(worker.stops, 0, "page handoff must cancel the pending stop")

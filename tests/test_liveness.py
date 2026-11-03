@@ -224,19 +224,20 @@ def main() -> int:
     heavy_out = None
     for _ in range(3):
         heavy_out = ev3b.observe(motion)
-    check("heavy mode refuses movement alone",
-          heavy_out.decision is lv.Decision.PENDING, heavy_out.decision.value)
+    check("heavy mode confirms natural movement",
+          heavy_out.decision is lv.Decision.CONFIRMED, heavy_out.decision.value)
 
     ev3c = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
     strict_out = None
     for _ in range(6):
         strict_out = ev3c.observe(motion)
-    check("strict mode refuses movement alone",
-          strict_out.decision is lv.Decision.PENDING, strict_out.decision.value)
+    check("strict mode confirms natural movement",
+          strict_out.decision is lv.Decision.CONFIRMED, strict_out.decision.value)
     head_turn = clean_readings()
     head_turn[lv.Cue.HEAD_TURN] = lv.CueReading(1.0, 1.0)
-    check("strict mode accepts the head-turn challenge",
-          ev3c.observe(head_turn).decision is lv.Decision.CONFIRMED)
+    ev3d = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
+    check("head-turn alone is not a confirmation cue",
+          ev3d.observe(head_turn).decision is lv.Decision.PENDING)
 
     check("unknown mode falls back to heavy, never off",
           lv.LivenessMode.from_name("off") is lv.LivenessMode.HEAVY)

@@ -230,6 +230,8 @@ class BuildManifestTests(unittest.TestCase):
         self.assertTrue(version_file.is_file(), "canonical VERSION file is missing")
         version = version_file.read_text(encoding="utf-8").strip()
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        package_version = (ROOT / "glance" / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn(f'__version__ = "{version}"', package_version)
         script = (ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("/DAppVersion=$appVersion", script)
         self.assertIn("--product-version=$appVersion", script)

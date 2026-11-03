@@ -72,6 +72,16 @@ class IdentityStoreMigrationTests(unittest.TestCase):
             store = core.IdentityStore(path)
             self.assertTrue(store.identities[0].enabled)
 
+    def test_identity_id_is_added_to_legacy_data_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.write_legacy(Path(temp) / "identities.json", [
+                {"name": "Anu", "samples": [vector(1).tolist()]},
+            ])
+            first = core.IdentityStore(path).identities[0]
+            second = core.IdentityStore(path).identities[0]
+        self.assertTrue(first.id)
+        self.assertEqual(first.id, second.id)
+
 
 class BestMatchEnabledTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -97,12 +107,20 @@ class BestMatchEnabledTests(unittest.TestCase):
 
 
 class RecaptureTests(unittest.TestCase):
-    def test_replace_samples_swaps_wholesale(self) -> None:
+    def test_replace_samples_targets_stable_identity_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            store = core.IdentityStore(Path(temp) / "identities.json")
+            path = Path(temp) / "identities.json"
+            store = core.IdentityStore(path)
             store.add_sample("Anu", vector(1), quality=0.9)
-            replaced = store.replace_samples("Anu", [vector(5), vector(6)], [0.4, 0.7])
+            identity_id = store.identities[0].id
+            store.save()
+
+            store = core.IdentityStore(path)
+            replaced = store.replace_samples(identity_id, [vector(5), vector(6)], [0.4, 0.7])
             self.assertEqual(len(replaced.samples), 2)
+            self.assertEqual(len(store.identities), 1)
+            self.assertEqual(replaced.id, identity_id)
+            self.assertEqual(replaced.name, "Anu")
             self.assertEqual([s.quality for s in replaced.samples], [0.4, 0.7])
             self.assertAlmostEqual(
                 float(np.dot(store.identities[0].samples[0].embedding, vector(5))),
@@ -124,7 +142,7 @@ class QualityTierTests(unittest.TestCase):
         self.assertEqual(quality_percent(qualities), 83)  # 15/18
 
     def test_unrated_samples_never_count_as_poor(self) -> None:
-        self.assertEqual(quality_percent([None, None, 0.2, 0.9]), 50)
+        self.assertEqual(quality_percent([None, None, 0.2, 0.9]), 75)
         self.assertIsNone(quality_percent([None, None]))
         self.assertEqual(quality_percent([]), None)
 

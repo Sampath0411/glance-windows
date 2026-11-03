@@ -18,7 +18,7 @@ from glance.desktop.pages import _unlock_display
 
 GRANT_LINE = (
     "2026-10-31 21:56:19  granted Sampath "
-    "(centroid 0.794, nearest 0.791, liveness heavy/Head turn) "
+    "(centroid 0.794, nearest 0.791, liveness heavy/Micro-motion) "
     "-> C:\\ProgramData\\Glance\\grant.bin"
 )
 BOOKEND_LINE = "2026-10-31 21:56:22  verification finished: granted"

@@ -271,7 +271,9 @@ class Verifier:
         deliberately not a desktop probe: OpenInputDesktop was tried and reported
         "unlocked" seconds after a genuine lock, which silently disabled unlocks.
         """
-        if not self.any_identity and (not self.identity or not self.identity.strip()):
+        if self.any_identity:
+            return "error: one enrolled identity must be selected"
+        if not self.identity or not self.identity.strip():
             return "error: no unlock identity selected"
 
         pipeline = GlancePipeline(self.paths.identities_path, self.threshold)
@@ -279,9 +281,8 @@ class Verifier:
         if scope_error is not None:
             return f"error: {scope_error}"
 
-        # In specific mode the selected identity is mandatory even when only one
-        # person is enrolled. A missing or stale selection must never implicitly
-        # authorize everyone; anyone mode is an explicit setting.
+        # The selected identity is mandatory even when only one person is enrolled.
+        # Missing, stale, and wildcard scope settings never authorize a face.
 
         evaluator = lv.LivenessEvaluator(mode=self.liveness)
         cap = pipeline.open_camera(0)
@@ -293,7 +294,6 @@ class Verifier:
         history: list[float] = []
         openness_history: list[float] = []
         motion_history: list = []
-        head_turn_tracker = lv.HeadTurnTracker()
         tracked_identity = ""
         matched_face_seen = False
 
@@ -303,7 +303,6 @@ class Verifier:
             history.clear()
             openness_history.clear()
             motion_history.clear()
-            head_turn_tracker.reset()
             tracked_identity = ""
 
         deadline = time.time() + self.timeout
@@ -364,16 +363,14 @@ class Verifier:
                     if eye is not None and eye.confidence >= lv.MIN_OPENNESS_CONFIDENCE:
                         openness_history.append(eye.openness)
                         del openness_history[:-12]
-                    head_turn_reading = head_turn_tracker.observe(
-                        lv.extract_head_pose_sample(landmarks)
-                    )
-                else:
-                    head_turn_tracker.reset()
-                    head_turn_reading = lv.CueReading.none()
-
                 snapshot = evaluator.observe(lv.readings(
-                    glare, device, openness_history, screen, texture,
-                    motion_history, interocular, head_turn_reading,
+                    glare=glare,
+                    device=device,
+                    openness_history=openness_history,
+                    screen=screen,
+                    texture=texture,
+                    motion_history=motion_history,
+                    interocular_px=interocular,
                 ))
 
                 if snapshot.decision is lv.Decision.DENIED:
@@ -408,10 +405,10 @@ class Verifier:
             cap.release()
 
         if outcome == "no-face" and matched_face_seen:
-            # A matching still photo reaches this point on every frame. Failing
-            # closed is the whole point; say so instead of reporting "no face".
+            # A matching but motionless image reaches this point on every frame.
+            # Stay fail-closed and describe the actual movement cue.
             log(f"denied: no proof of life ({self.liveness.value}) within {self.timeout:.0f}s - "
-                "no qualifying head-turn sequence detected")
+                "no qualifying natural facial movement detected")
             outcome = "denied"
         return outcome
 
@@ -590,10 +587,10 @@ def resolve_identity(config: dict, cli_identity: str | None) -> str | None:
 
 
 def resolve_any_identity(config: dict, cli_any: bool | None = None) -> bool:
-    """Anyone-enrolled is the default unless a config explicitly opts out."""
+    """Only an explicit wildcard setting enables the legacy wildcard value."""
     if cli_any is not None:
         return bool(cli_any)
-    return config.get("any_identity") is not False
+    return config.get("any_identity") is True
 
 
 def main() -> int:

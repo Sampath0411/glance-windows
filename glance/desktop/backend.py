@@ -88,6 +88,16 @@ MATCH_CONFIDENCE_STOPS = {
     "more_strict": 0.68,
 }
 
+
+def distance_from_slider(value: int) -> str:
+    """Map the compact 0-100 distance slider onto the supported stops."""
+    value = max(0, min(100, int(value)))
+    if value < 34:
+        return "close"
+    if value < 67:
+        return DETECTION_DISTANCE_DEFAULT
+    return "far"
+
 LIVENESS_MODES = ("light", "heavy", "strict")
 
 
@@ -101,7 +111,7 @@ class Settings:
     camera: int = 0
     idle_lock_enabled: bool = False
     idle_lock_minutes: int = 5
-    any_identity: bool = True
+    any_identity: bool = False
     liveness: str = "heavy"
     detection_distance: str = DETECTION_DISTANCE_DEFAULT
     face_detection_seconds: int = 5
@@ -131,7 +141,7 @@ class Settings:
             camera=int(data.get("camera", 0)),
             idle_lock_enabled=data.get("idle_lock_enabled") is True,
             idle_lock_minutes=_idle_minutes(data),
-            any_identity=data.get("any_identity") is not False,
+            any_identity=data.get("any_identity") is True,
             liveness=_liveness_mode(data.get("liveness")),
             detection_distance=_detection_distance(data),
             face_detection_seconds=_face_detection_seconds(data),
@@ -677,10 +687,15 @@ def enable_windows_unlock() -> tuple[bool, str]:
     people = identity_summary(0)
     if not people:
         return False, "Enroll a face before enabling Windows unlock."
-    if not settings.any_identity and not any(
-        person["name"] == settings.identity for person in people
-    ):
+    if settings.any_identity:
+        return False, "Select one enrolled person before enabling Windows unlock."
+    selected = next(
+        (person for person in people if person["name"] == settings.identity), None
+    )
+    if selected is None:
         return False, "Select the face that may unlock before enabling Windows unlock."
+    if not selected.get("enabled", True):
+        return False, "Enable the selected person's face before enabling Windows unlock."
     if not GRANT_TOOL.is_file():
         return False, "Glance credential helper is missing. Repair or reinstall Glance."
     if not credential_status(0).get("present"):
@@ -804,6 +819,7 @@ def _identity_summary() -> list[dict]:
     summary = []
     for identity in store.identities:
         summary.append({
+            "id": identity.id,
             "name": identity.name,
             "samples": len(identity.samples),
             "qualities": [sample.quality for sample in identity.samples],

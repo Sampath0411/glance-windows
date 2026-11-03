@@ -1,11 +1,12 @@
 """Compact capture cards and silent playback of the original Mac animation assets."""
 import cv2
-from PySide6.QtCore import QElapsedTimer, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
+from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
 from ..paths import resolve_paths
 from .enrollment import TARGET, quality_percent, quality_tier
+from .theme import ACCENT
 
 _loader = None
 _clips = None
@@ -50,8 +51,12 @@ class AnimationLoader(QThread):
 
 
 class ScanAnimation(QWidget):
-    """One-shot native-timing playback; holds the final frame and never plays sound."""
-    def __init__(self, parent=None, size=80, art=64, radius=16):
+    """One-shot native-timing playback; holds the final frame and never plays sound.
+
+    ``style`` is "original" (video playback) or "minimal" (a simple static
+    state icon). When video is disabled the minimal icon is always used.
+    """
+    def __init__(self, parent=None, size=80, art=64, radius=16, style="original"):
         super().__init__(parent)
         self._art = art
         self._radius = radius
@@ -63,6 +68,7 @@ class ScanAnimation(QWidget):
         self.current_frame = QImage()
         self.clips = {}
         self.state = "idle"
+        self.style = "minimal" if style != "original" else "original"
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
         self.timer.setInterval(16)
@@ -70,6 +76,45 @@ class ScanAnimation(QWidget):
         self.root = root
         self._load_connected = False
         self.show_state("idle")
+
+    def set_style(self, style: str) -> None:
+        self.style = "minimal" if style != "original" else "original"
+        if self.style == "minimal":
+            self.timer.stop()
+            self.current_frame = QImage()
+        self.update()
+
+    def _paint_minimal(self, painter: QPainter) -> None:
+        center = self.rect().center()
+        radius = min(self.width(), self.height()) / 2 - 4
+        outlined = QColor("#dcecff")
+        outlined.setAlpha(90)
+        painter.setPen(QPen(outlined, 2.5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(center, radius, radius)
+        if self.state == "success":
+            pen = QPen(QColor(94, 220, 120), 3)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(QPolygonF([
+                QPointF(center.x() - radius * 0.42, center.y()),
+                QPointF(center.x() - radius * 0.12, center.y() + radius * 0.34),
+                QPointF(center.x() + radius * 0.45, center.y() - radius * 0.30),
+            ]))
+        elif self.state == "failure":
+            color = QColor("#ff6b6b")
+            painter.setPen(QPen(color, 3))
+            off = radius * 0.32
+            painter.drawLine(QPointF(center.x() - off, center.y() - off),
+                            QPointF(center.x() + off, center.y() + off))
+            painter.drawLine(QPointF(center.x() - off, center.y() + off),
+                            QPointF(center.x() + off, center.y() - off))
+        else:
+            inner = QColor(ACCENT)
+            inner.setAlpha(150)
+            painter.setPen(QPen(inner, 2.5))
+            painter.drawEllipse(center, radius * 0.55, radius * 0.55)
 
     def paintEvent(self, event):  # noqa: N802
         painter = QPainter(self)
@@ -82,16 +127,19 @@ class ScanAnimation(QWidget):
         path = QPainterPath()
         path.addRoundedRect(self.rect(), self._radius, self._radius)
         painter.setClipPath(path)
-        image = self.current_frame if not self.current_frame.isNull() else self.still
-        if not image.isNull():
-            side = min(self._art, self.width(), self.height())
-            scaled = image.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            painter.drawImage((self.width() - scaled.width()) / 2,
-                              (self.height() - scaled.height()) / 2, scaled)
+        if self.style == "minimal":
+            self._paint_minimal(painter)
         else:
-            painter.setPen(QColor("#dcecff"))
-            painter.drawText(self.rect(), Qt.AlignCenter,
-                             {"success": "✓", "failure": "Retry"}.get(self.state, "Scanning"))
+            image = self.current_frame if not self.current_frame.isNull() else self.still
+            if not image.isNull():
+                side = min(self._art, self.width(), self.height())
+                scaled = image.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                painter.drawImage((self.width() - scaled.width()) / 2,
+                                  (self.height() - scaled.height()) / 2, scaled)
+            else:
+                painter.setPen(QColor("#dcecff"))
+                painter.drawText(self.rect(), Qt.AlignCenter,
+                                 {"success": "✓", "failure": "Retry"}.get(self.state, "Scanning"))
         painter.restore()
 
     def showEvent(self, event):  # noqa: N802
@@ -121,6 +169,10 @@ class ScanAnimation(QWidget):
     def show_state(self, state):
         self.state = state
         self.timer.stop()
+        if self.style == "minimal":
+            self.current_frame = QImage()
+            self.update()
+            return
         frames, _ = self.clips.get(state, ([], 60))
         if not frames:
             self.current_frame = QImage()

@@ -3,7 +3,7 @@
 import math
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -208,6 +208,98 @@ class Sidebar(QFrame):
             self.status_dot.set_color(color)
 
 
+class FloatingNavButton(NavButton):
+    """Compact icon-first navigation button; only the active tab shows a label."""
+
+    def __init__(self, text: str, index: int, parent=None):
+        super().__init__(text, index, parent)
+        self.setObjectName("compactNav")
+        self.setIcon(QIcon())
+        self.setText(text)
+        self.setMinimumHeight(40)
+        self.setFixedWidth(44)
+        self.setToolTip(text)
+        self.toggled.connect(self._sync_width)
+        self._sync_width(self.isChecked())
+        self.setIcon(navigation_icon(index, "#f6f9ff" if self.isChecked() else "#94a4ba"))
+
+    def _sync_width(self, checked: bool) -> None:
+        self.setFixedWidth(44 + (QFontMetrics(self.font()).horizontalAdvance(self.text()) + 10
+                                 if checked else 0))
+        self.update()
+
+    def _sync_icon(self, checked: bool) -> None:
+        self.setIcon(navigation_icon(self._index, "#f6f9ff" if checked else "#94a4ba"))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self.isChecked():
+            painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
+            painter.setBrush(QColor(255, 255, 255, 24))
+            painter.drawRoundedRect(rect, 17, 17)
+        elif self.underMouse():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 14))
+            painter.drawRoundedRect(rect, 17, 17)
+
+        pixmap = self.icon().pixmap(20, 20)
+        x = 12 if self.isChecked() else (self.width() - 20) / 2
+        y = (self.height() - 20) / 2
+        painter.drawPixmap(int(x), int(y), pixmap)
+        if self.isChecked():
+            painter.setPen(QColor("#f6f9ff"))
+            painter.setFont(self.font())
+            painter.drawText(
+                QRectF(36, 0, self.width() - 41, self.height()),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                self.text(),
+            )
+
+
+class FloatingNavigation(QFrame):
+    """Six-page capsule navigation inspired by compact native settings apps."""
+
+    indexChanged = Signal(int)
+
+    def __init__(self, labels: tuple[str, ...], parent=None):
+        super().__init__(parent)
+        self.setObjectName("floatingNavigation")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(54)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(3)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.buttons: list[FloatingNavButton] = []
+        for index, label in enumerate(labels):
+            button = FloatingNavButton(label, index, self)
+            self._group.addButton(button, index)
+            layout.addWidget(button)
+            self.buttons.append(button)
+        self._group.idClicked.connect(self.indexChanged.emit)
+        self.set_current_index(0)
+
+    def count(self) -> int:
+        return len(self.buttons)
+
+    def set_current_index(self, index: int) -> None:
+        if 0 <= index < len(self.buttons):
+            self.buttons[index].setChecked(True)
+
+    def set_status(self, text: str, color: str | None = None) -> None:
+        # Kept for callers migrating from the former sidebar; status now lives in
+        # the compact title bar, where it remains visible on every page.
+        label = getattr(self, "status_label", None)
+        dot = getattr(self, "status_dot", None)
+        if label is not None:
+            label.setText(text)
+        if color and dot is not None:
+            dot.set_color(color)
+
+
 class WindowButton(QAbstractButton):
     """One minimal caption glyph: minimise, maximise/restore, or close."""
 
@@ -284,17 +376,36 @@ class WindowControls(QWidget):
 
 
 def style_native_window(window):
-    """Request dark immersive chrome and keep native Windows behaviour."""
+    """Enable Windows acrylic and return whether the native effect succeeded."""
     import ctypes
     from ctypes import wintypes
 
     try:
         set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
         set_attribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-        for attribute, value in ((20, 1), (33, 2)):
-            number = ctypes.c_int(value)
-            set_attribute(
-                int(window.winId()), attribute, ctypes.byref(number), ctypes.sizeof(number)
-            )
-    except (AttributeError, OSError):
-        pass  # Older Windows versions retain their standard native frame.
+        dark_mode = ctypes.c_int(1)
+        set_attribute(int(window.winId()), 20, ctypes.byref(dark_mode), ctypes.sizeof(dark_mode))
+
+        class AccentPolicy(ctypes.Structure):
+            _fields_ = [
+                ("state", ctypes.c_int),
+                ("flags", ctypes.c_int),
+                ("gradient_color", ctypes.c_uint),
+                ("animation_id", ctypes.c_int),
+            ]
+
+        class WindowCompositionAttributeData(ctypes.Structure):
+            _fields_ = [
+                ("attribute", ctypes.c_int),
+                ("data", ctypes.c_void_p),
+                ("size", ctypes.c_size_t),
+            ]
+
+        policy = AccentPolicy(4, 2, 0xB82A241C, 0)  # acrylic blur with blue-teal tint
+        data = WindowCompositionAttributeData(19, ctypes.addressof(policy), ctypes.sizeof(policy))
+        activate = ctypes.windll.user32.SetWindowCompositionAttribute
+        activate.argtypes = [wintypes.HWND, ctypes.POINTER(WindowCompositionAttributeData)]
+        activate.restype = ctypes.c_int
+        return bool(activate(int(window.winId()), ctypes.byref(data)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False  # Keep the painted glass fallback on unsupported Windows builds.

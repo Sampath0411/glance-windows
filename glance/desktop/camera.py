@@ -87,13 +87,13 @@ class _GateVerifier:
     def __init__(self):
         self.evaluator = lv.LivenessEvaluator(mode=lv.LivenessMode.STRICT)
         self.name = ""
-        self.head_turn_tracker = lv.HeadTurnTracker()
+        self.motion_history: list = []
         self.denial = ""
 
     def reset_identity(self):
         self.evaluator.reset()
         self.name = ""
-        self.head_turn_tracker.reset()
+        self.motion_history.clear()
 
     def verify(self, frame, face, aligned, name, score):
         if self.denial:
@@ -104,9 +104,12 @@ class _GateVerifier:
         if name != self.name:
             self.reset_identity()
             self.name = name
-        head_turn = self.head_turn_tracker.observe(
-            lv.extract_head_pose_sample(getattr(face, "kps", None))
-        )
+        landmarks = getattr(face, "kps", None)
+        interocular = lv.interocular_distance(landmarks)
+        ratios = lv.landmark_ratios(landmarks)
+        if ratios is not None:
+            self.motion_history.append(ratios)
+            del self.motion_history[:-12]
         x1, y1, x2, y2 = [int(value) for value in face.bbox]
         pad = int(.15 * max(x2 - x1, y2 - y1))
         crop = frame[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad]
@@ -115,23 +118,18 @@ class _GateVerifier:
             device=lv.detect_device_rectangle(frame, tuple(face.bbox)),
             screen=lv.extract_screen_glow(frame, tuple(face.bbox)),
             texture=lv.extract_texture(crop),
-            head_turn=head_turn,
+            motion_history=self.motion_history,
+            interocular_px=interocular,
         ))
         if snapshot.decision is lv.Decision.DENIED:
             self.denial = snapshot.denial_reason() or "Liveness check failed"
             return "", 0.0, self.denial
         if snapshot.decision is lv.Decision.CONFIRMED:
             return name, score, ""
-        hints = {
-            "baseline": "Face forward to begin",
-            "left": "Turn your head left",
-            "right": "Turn your head right",
-            "return": "Face forward again",
-            "quality": "Move closer and face the camera in steady lighting",
-            "complete": "Head turn complete",
-        }
-        hint = hints.get(self.head_turn_tracker.phase, "Face forward, then turn left and right")
-        return "", 0.0, hint
+        return "", 0.0, (
+            "Stay visible and move naturally. Still photos may be rejected, but a moving "
+            "photo or replay video may pass this motion check."
+        )
 
 
 class CameraWorker(QThread):
@@ -363,8 +361,13 @@ class CameraWorker(QThread):
         else:
             small = frame
 
+        # Show a mirror-like selfie preview. Recognition, alignment, and embeddings
+        # continue to use the untouched source frame above this presentation layer.
+        small = cv2.flip(small, 1)
+        preview_width = small.shape[1]
         boxes = [
-            (x1 * scale, y1 * scale, x2 * scale, y2 * scale)
+            (preview_width - x2 * scale, y1 * scale,
+             preview_width - x1 * scale, y2 * scale)
             for (x1, y1, x2, y2) in (tuple(float(v) for v in face.bbox) for face in faces)
         ]
         return CameraWorker._to_image(small), FrameInfo(boxes, label, score, hint)

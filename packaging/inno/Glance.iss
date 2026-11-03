@@ -31,6 +31,9 @@ ArchitecturesAllowed=x64
 SetupLogging=yes
 InfoBeforeFile=..\installer-info.txt
 
+[Messages]
+WinVersionTooLowError=This app can't run on this PC. Glance requires Windows 11 x64 (build 22000 or newer).
+
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 

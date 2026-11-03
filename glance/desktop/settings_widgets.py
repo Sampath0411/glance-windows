@@ -118,6 +118,47 @@ class FloatingTabBar(QWidget):
             self.buttons[index].setChecked(True)
 
 
+class CompactModePicker(QWidget):
+    """Small native-looking segmented selector for two or three short choices."""
+
+    valueChanged = Signal(str)
+
+    def __init__(self, options: tuple[tuple[str, str], ...], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("compactModePicker")
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.buttons: dict[str, QPushButton] = {}
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
+        for index, (key, label) in enumerate(options):
+            button = QPushButton(label)
+            button.setObjectName("compactModeOption")
+            button.setCheckable(True)
+            button.setAccessibleName(label)
+            button.setMinimumHeight(34)
+            self._group.addButton(button, index)
+            layout.addWidget(button, 1)
+            self.buttons[key] = button
+        self._group.idClicked.connect(self._emit_value)
+
+    def _emit_value(self, index: int) -> None:
+        button = self._group.button(index)
+        if button is not None:
+            key = next(name for name, item in self.buttons.items() if item is button)
+            self.valueChanged.emit(key)
+
+    def value(self) -> str | None:
+        return next((key for key, button in self.buttons.items() if button.isChecked()), None)
+
+    def set_value(self, key: str | None) -> None:
+        self._group.setExclusive(False)
+        for name, button in self.buttons.items():
+            button.setChecked(name == key)
+        self._group.setExclusive(True)
+
+
 class Select(QComboBox):
     """Combo box with a chevron painted over the glass field.
 

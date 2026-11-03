@@ -129,7 +129,6 @@ def cmd_live(args) -> int:
     meter = fps_meter()
     history: list[float] = []
     motion_history: list = []
-    head_turn_tracker = lv.HeadTurnTracker()
     try:
         while True:
             ok, frame = cap.read()
@@ -154,7 +153,6 @@ def cmd_live(args) -> int:
                 if face_fraction < MIN_FACE_FRACTION:
                     history.clear()
                     motion_history.clear()
-                    head_turn_tracker.reset()
                     verdict = "TOO FAR - move closer"
                     detail = (f"face fills {face_fraction * 100:.1f}% of the frame; "
                               f"need {MIN_FACE_FRACTION * 100:.0f}% or more")
@@ -173,7 +171,6 @@ def cmd_live(args) -> int:
                 elif face_fraction >= MIN_FACE_FRACTION:
                     history.clear()
                     motion_history.clear()
-                    head_turn_tracker.reset()
                     best_any = max(
                         (i.score(emb) for i in pipeline.store.identities if i.samples),
                         key=lambda x: x[0],
@@ -198,14 +195,10 @@ def cmd_live(args) -> int:
                     if ratios is not None:
                         motion_history.append(ratios)
                         motion_history = motion_history[-12:]
-                    head_turn_reading = head_turn_tracker.observe(
-                        lv.extract_head_pose_sample(landmarks, mirrored=True)
-                    )
                     snap = evaluator.observe(lv.readings(
-                        glare, device, screen=screen, texture=texture,
+                        glare=glare, device=device, screen=screen, texture=texture,
                         motion_history=motion_history,
                         interocular_px=lv.interocular_distance(landmarks),
-                        head_turn=head_turn_reading,
                     ))
 
                     if snap.decision is lv.Decision.DENIED:
@@ -218,13 +211,11 @@ def cmd_live(args) -> int:
                         live_line = f"LIVENESS: pass [{evaluator.mode.value}]{by}"
                     else:
                         live_line = (f"LIVENESS: scanning [{evaluator.mode.value}] "
-                                     f"head-turn phase: {head_turn_tracker.phase}"
-                                     "  - face forward, turn left, turn right, return")
+                                     "move naturally; replay video may pass")
             else:
                 if evaluator is not None:
                     evaluator.reset()  # face lost: this is a new scan
                     motion_history.clear()
-                    head_turn_tracker.reset()
 
             draw_banner(frame, f"{verdict}   {fps:4.1f}fps", colour)
             if detail:
@@ -250,7 +241,6 @@ def cmd_bench(args) -> int:
     timings = {"detect": [], "embed": [], "glare": [], "device": [], "screen": [], "moire": []}
     decisions: dict[str, int] = {}
     motion_history: list = []
-    head_turn_tracker = lv.HeadTurnTracker()
 
     print(f"bench: {args.frames} frames, liveness={args.liveness}\n")
     try:
@@ -264,7 +254,6 @@ def cmd_bench(args) -> int:
             faces = pipeline.detector.detect(frame)
             timings["detect"].append((time.perf_counter() - t0) * 1000)
             if not faces:
-                head_turn_tracker.reset()
                 print(f"  frame {i + 1:02d}: no face")
                 continue
             face = faces[0]
@@ -300,14 +289,10 @@ def cmd_bench(args) -> int:
                 if ratios is not None:
                     motion_history.append(ratios)
                     del motion_history[:-12]
-                head_turn_reading = head_turn_tracker.observe(
-                    lv.extract_head_pose_sample(landmarks, mirrored=True)
-                )
                 snap = evaluator.observe(lv.readings(
-                    glare, device, screen=screen, texture=texture,
+                    glare=glare, device=device, screen=screen, texture=texture,
                     motion_history=motion_history,
                     interocular_px=lv.interocular_distance(landmarks),
-                    head_turn=head_turn_reading,
                 ))
                 decisions[snap.decision.value] = decisions.get(snap.decision.value, 0) + 1
     finally:
@@ -397,7 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--liveness", choices=["off", "light", "heavy", "strict"], default="heavy",
-                    help="heavy/strict = spoof checks and forward-left-right-forward head-turn challenge; "
+                    help="heavy/strict = spoof deny cues plus natural facial micro-motion; "
                          "light = deny cues only (diagnostics)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

@@ -210,7 +210,7 @@ class FaceGateDialog(QDialog):
             return
 
         self._scanning = True
-        self.status.setText("Face forward to begin the head-turn check")
+        self.status.setText("Look toward the camera and move naturally")
         self._hold_camera()
         self.camera.set_gate(True)
         self._scan_timer.start()
@@ -250,7 +250,7 @@ class FaceGateDialog(QDialog):
         self._streak = 0
         self.status.setText("Camera check")
         self.status.setStyleSheet("")
-        self.hint.setText(hint or "Face forward, then turn left and right")
+        self.hint.setText(hint or "Stay visible and move naturally")
 
     def _on_camera_failed(self, message: str) -> None:
         if self._scanning:

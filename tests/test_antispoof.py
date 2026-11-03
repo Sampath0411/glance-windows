@@ -43,6 +43,18 @@ class ModeTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIs(lv.LivenessMode.from_name(value), lv.LivenessMode.HEAVY)
 
+
+class AgentScopeDefaultTests(unittest.TestCase):
+    def test_omitted_scope_defaults_to_selected_person_not_anyone(self) -> None:
+        self.assertFalse(glance_agent.resolve_any_identity({}, None))
+
+    def test_explicit_legacy_wildcard_remains_fail_closed(self) -> None:
+        result, writer = _run_verifier(
+            [_synthetic_aligned(open_eye=True)], any_identity=True,
+        )
+        self.assertNotEqual(result, "granted")
+        self.assertEqual(writer.calls, 0)
+
     def test_all_modes_round_trip(self) -> None:
         for mode in lv.LivenessMode:
             self.assertIs(lv.LivenessMode.from_name(mode.value), mode)
@@ -60,31 +72,24 @@ class ModeTests(unittest.TestCase):
             snapshot = ev.observe(clean_readings())
         self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
 
-    def test_strict_ignores_motion_and_blink(self) -> None:
+    def test_strict_confirms_on_sustained_natural_motion(self) -> None:
         ev = evaluator(lv.LivenessMode.STRICT)
         motion = lv.CueReading(1.0, 1.0)
-        for _ in range(6):
-            snapshot = ev.observe(clean_readings({
-                lv.Cue.MICRO_MOTION: motion,
-                lv.Cue.BLINK: motion,
-            }))
-        self.assertIs(snapshot.decision, lv.Decision.PENDING)
+        for _ in range(lv.LivenessTuning().motion_frames):
+            snapshot = ev.observe(clean_readings({lv.Cue.MICRO_MOTION: motion}))
+        self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
+        self.assertIs(snapshot.confirmed_by, lv.Cue.MICRO_MOTION)
 
-    def test_heavy_and_strict_confirm_on_head_turn(self) -> None:
+    def test_head_turn_alone_no_longer_confirms(self) -> None:
         ev = evaluator(lv.LivenessMode.STRICT)
         head_turn = lv.CueReading(1.0, 1.0)
         snapshot = ev.observe(clean_readings({lv.Cue.HEAD_TURN: head_turn}))
-        self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
-        self.assertIs(snapshot.confirmed_by, lv.Cue.HEAD_TURN)
+        self.assertIs(snapshot.decision, lv.Decision.PENDING)
 
-        ev = evaluator(lv.LivenessMode.HEAVY)
-        snapshot = ev.observe(clean_readings({lv.Cue.HEAD_TURN: head_turn}))
-        self.assertIs(snapshot.decision, lv.Decision.CONFIRMED)
-
-    def test_waiting_reason_names_head_turn_challenge(self) -> None:
+    def test_waiting_reason_describes_natural_motion(self) -> None:
         snapshot = evaluator(lv.LivenessMode.HEAVY).observe(clean_readings())
-        self.assertIn("left", snapshot.waiting_reason())
-        self.assertIn("right", snapshot.waiting_reason())
+        self.assertIn("natural", snapshot.waiting_reason().lower())
+        self.assertIn("movement", snapshot.waiting_reason().lower())
 
     def test_every_deny_cue_overrides_blink(self) -> None:
         deny_cues = [cue for cue in lv.Cue if cue.role is lv.CueRole.DENY]
@@ -503,17 +508,33 @@ class DesktopLivenessTests(unittest.TestCase):
                 result = self.observe(self.open, yaw=yaw)
         return result
 
-    def test_static_face_is_withheld_but_head_turn_releases_match(self):
+    def test_static_face_is_withheld_but_natural_motion_releases_match(self):
         for _ in range(12):
             self.assertEqual(self.observe(self.open)[0], "")
-        self.assertEqual(self.head_turn()[0], "Sampath")
+        result = None
+        for amount in (0.0, 1.0, 3.0, 7.0, 12.0, 16.0, 13.0, 6.0, 1.0):
+            self.face.kps[3, 0] = 130.0 - amount
+            self.face.kps[4, 0] = 170.0 + amount
+            result = self.observe(self.open)
+        self.assertEqual(result[0], "Sampath")
 
-    def test_identity_change_cannot_inherit_a_head_turn(self):
-        self.assertEqual(self.head_turn()[0], "Sampath")
+    def test_pending_motion_guidance_does_not_claim_spoof_impossibility(self):
+        _name, _score, hint = self.observe(self.open)
+        self.assertIn("may pass", hint.lower())
+        self.assertNotIn("cannot pass", hint.lower())
+
+    def test_identity_change_cannot_inherit_motion_progress(self):
+        for amount in (0.0, 1.0, 3.0, 7.0, 12.0):
+            self.face.kps[3, 0] = 130.0 - amount
+            self.face.kps[4, 0] = 170.0 + amount
+            self.observe(self.open)
         self.assertEqual(self.observe(self.open, "Other")[0], "")
 
-    def test_face_loss_cannot_preserve_a_head_turn(self):
-        self.assertEqual(self.head_turn()[0], "Sampath")
+    def test_face_loss_cannot_preserve_motion_progress(self):
+        for amount in (0.0, 1.0, 3.0, 7.0, 12.0):
+            self.face.kps[3, 0] = 130.0 - amount
+            self.face.kps[4, 0] = 170.0 + amount
+            self.observe(self.open)
         self.gate.reset_identity()
         self.assertEqual(self.observe(self.open)[0], "")
 
@@ -523,7 +544,7 @@ class DesktopLivenessTests(unittest.TestCase):
             for _ in range(4):
                 self.observe(self.open)
         self.gate.reset_identity()
-        name, score, hint = self.head_turn()
+        name, score, hint = self.observe(self.open)
         self.assertEqual(name, "")
         self.assertEqual(score, 0.)
         self.assertIn("screen", hint.lower())
@@ -536,14 +557,14 @@ class AgentIntegrationTests(unittest.TestCase):
         )
         self.assertIs(verifier.liveness, lv.LivenessMode.HEAVY)
 
-    def test_static_photo_with_landmark_jitter_does_not_grant(self):
+    def test_motion_in_a_replay_can_pass_so_disclosure_is_required(self):
         result, writer = _run_verifier(
             [_synthetic_aligned(open_eye=True)], frames=12, motion=6.0,
         )
-        self.assertEqual(result, "denied")
-        self.assertEqual(writer.calls, 0)
+        self.assertEqual(result, "granted")
+        self.assertEqual(writer.calls, 1)
 
-    def test_forward_left_right_forward_sequence_grants(self):
+    def test_unprompted_head_movement_counts_as_natural_motion(self):
         yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
         script = [_synthetic_aligned(True)] * len(yaws)
         result, writer = _run_verifier(
@@ -553,7 +574,7 @@ class AgentIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "granted")
         self.assertEqual(writer.calls, 1)
 
-    def test_identity_change_resets_head_turn_progress(self):
+    def test_identity_change_resets_motion_progress(self):
         yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
         identities = ["Sampath"] * 7 + ["Anu"] * 6
         script = [_synthetic_aligned(True)] * len(yaws)
@@ -570,9 +591,9 @@ class AgentIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
 
-    def test_heavy_rejects_landmark_motion_on_a_static_photo(self) -> None:
+    def test_no_natural_motion_rejects_a_static_face(self) -> None:
         result, writer = _run_verifier(
-            [_synthetic_aligned(open_eye=True)], frames=12, motion=6.0,
+            [_synthetic_aligned(open_eye=True)], frames=12, motion=0.0,
         )
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
@@ -592,16 +613,10 @@ class AgentIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "denied")
         self.assertEqual(writer.calls, 0)
 
-    def test_strict_refuses_movement_but_accepts_head_turn(self) -> None:
-        still = _synthetic_aligned(open_eye=True)
-        result, writer = _run_verifier([still], frames=12, motion=6.0, liveness="strict")
-        self.assertEqual(result, "denied")
-        self.assertEqual(writer.calls, 0)
-
-        yaws = [0.0] * 4 + [-.18] * 3 + [.18] * 3 + [0.0] * 3
-        script = [_synthetic_aligned(True)] * len(yaws)
-        result, writer = _run_verifier(script, frames=len(yaws), liveness="strict",
-                                       head_turn_series=yaws)
+    def test_strict_confirms_natural_motion(self) -> None:
+        result, writer = _run_verifier(
+            [_synthetic_aligned(open_eye=True)], frames=12, motion=6.0, liveness="strict",
+        )
         self.assertEqual(result, "granted")
         self.assertEqual(writer.calls, 1)
 

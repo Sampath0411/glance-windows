@@ -23,7 +23,9 @@ to the secure desktop, so Phase 3 needs a credential provider instead.
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -309,6 +311,7 @@ class Identity:
     name: str
     enabled: bool = True
     samples: list[FaceSample] = field(default_factory=list)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     @property
     def template(self) -> np.ndarray:
@@ -377,7 +380,6 @@ class IdentityStore:
         sealed = SEALED_MAGIC + dpapi.protect(raw)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_bytes(sealed)
-        import os
         os.replace(temporary, self.path)
         return raw
 
@@ -386,7 +388,6 @@ class IdentityStore:
         sealed = SEALED_MAGIC + dpapi.protect(payload)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_bytes(sealed)
-        import os
         os.replace(temporary, self.path)
 
     def load(self) -> None:
@@ -395,11 +396,29 @@ class IdentityStore:
         payload = self._read_payload_bytes()
         data = json.loads(payload.decode("utf-8"))
         identities = []
+        seen_ids: set[str] = set()
+        migrated_ids = False
         for item in data.get("identities", []):
             enabled = item.get("enabled", True)
             samples = [self._parse_sample(raw) for raw in (item.get("samples") or [])]
-            identities.append(Identity(name=item["name"], enabled=enabled, samples=samples))
+            identity_id = item.get("id")
+            try:
+                identity_id = str(uuid.UUID(str(identity_id)))
+            except (ValueError, TypeError, AttributeError):
+                identity_id = str(uuid.uuid4())
+                migrated_ids = True
+            if identity_id in seen_ids:
+                identity_id = str(uuid.uuid4())
+                migrated_ids = True
+            seen_ids.add(identity_id)
+            identities.append(Identity(
+                name=item["name"], enabled=enabled, samples=samples, id=identity_id
+            ))
         self.identities = identities
+        if migrated_ids:
+            # Persist IDs for stable recapture targeting after future reloads.
+            # Save remains atomic and DPAPI-sealed.
+            self.save()
 
     def save(self) -> None:
         payload = {
@@ -407,6 +426,7 @@ class IdentityStore:
             "model": "arcface-w600k_mbf-v1",
             "identities": [
                 {
+                    "id": i.id,
                     "name": i.name,
                     "enabled": i.enabled,
                     "samples": [
@@ -427,13 +447,12 @@ class IdentityStore:
         identity.samples.append(FaceSample(embedding.astype(np.float32), quality))
         return identity
 
-    def replace_samples(self, name: str, embeddings: list[np.ndarray],
-                       qualities: list[float | None] | None = None) -> Identity:
-        """Replace an identity's samples wholesale (recapture is a redo, never an append)."""
-        identity = next((i for i in self.identities if i.name == name), None)
+    def replace_samples(self, identity_id: str, embeddings: list[np.ndarray],
+                        qualities: list[float | None] | None = None) -> Identity:
+        """Replace samples by stored identity ID (recapture is never an append)."""
+        identity = next((i for i in self.identities if i.id == identity_id), None)
         if identity is None:
-            identity = Identity(name=name)
-            self.identities.append(identity)
+            raise KeyError(f"no identity with id {identity_id}")
         qualities = qualities or [None] * len(embeddings)
         identity.samples = [
             FaceSample(np.asarray(e, dtype=np.float32), q)
